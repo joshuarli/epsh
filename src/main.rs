@@ -46,12 +46,7 @@ fn main() {
             } else {
                 // Script file
                 let filename = &args[i];
-                shell.set_args(
-                    &args[i..]
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<&str>>(),
-                );
+                shell.set_args(&args[i..].iter().map(|s| s.as_str()).collect::<Vec<&str>>());
                 let content = match std::fs::read_to_string(filename) {
                     Ok(c) => c,
                     Err(e) => {

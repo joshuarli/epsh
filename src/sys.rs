@@ -3,7 +3,7 @@
 
 use std::os::unix::io::RawFd;
 
-extern "C" {
+unsafe extern "C" {
     pub fn fork() -> i32;
     pub fn _exit(status: i32) -> !;
     pub fn pipe(fds: *mut i32) -> i32;
@@ -21,15 +21,21 @@ extern "C" {
 
 pub const F_DUPFD_CLOEXEC: i32 = {
     #[cfg(target_os = "linux")]
-    { 1030 }
+    {
+        1030
+    }
     #[cfg(target_os = "macos")]
-    { 67 }
+    {
+        67
+    }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    { 1030 }
+    {
+        1030
+    }
 };
 
 pub unsafe fn fcntl_dupfd_cloexec(fd: RawFd, min_fd: RawFd) -> i32 {
-    fcntl(fd, F_DUPFD_CLOEXEC, min_fd)
+    unsafe { fcntl(fd, F_DUPFD_CLOEXEC, min_fd) }
 }
 
 // waitpid status macros

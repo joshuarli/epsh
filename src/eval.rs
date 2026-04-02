@@ -46,6 +46,12 @@ struct SavedFd {
     saved_copy: Option<RawFd>,
 }
 
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shell {
     pub fn new() -> Self {
         Shell {
@@ -183,8 +189,10 @@ impl Shell {
         // propagate status but don't trigger errexit directly.
         let is_leaf = matches!(
             cmd,
-            Command::Simple { .. } | Command::Pipeline { .. }
-            | Command::Subshell { .. } | Command::Background { .. }
+            Command::Simple { .. }
+                | Command::Pipeline { .. }
+                | Command::Subshell { .. }
+                | Command::Background { .. }
         );
         if self.opts.errexit && is_leaf && !self.tested && status != 0 {
             return Err(ShellError::Exit(status));
@@ -205,7 +213,7 @@ impl Shell {
             Command::Pipeline {
                 commands,
                 bang,
-                span,
+                span: _,
             } => {
                 let status = self.eval_pipeline(commands)?;
                 Ok(if *bang {
@@ -249,12 +257,20 @@ impl Shell {
                 self.eval_command(right)
             }
 
-            Command::Subshell { body, redirs, span } => {
+            Command::Subshell {
+                body,
+                redirs,
+                span: _,
+            } => {
                 // Fork a child process for the subshell
                 self.eval_in_subshell(body, redirs)
             }
 
-            Command::BraceGroup { body, redirs, span } => {
+            Command::BraceGroup {
+                body,
+                redirs,
+                span: _,
+            } => {
                 let saved = self.setup_redirections(redirs)?;
                 let result = self.eval_command(body);
                 self.restore_redirections(saved);
@@ -390,8 +406,7 @@ impl Shell {
             }
 
             Command::Case { word, arms, .. } => {
-                let expanded =
-                    self.expand_string(word);
+                let expanded = self.expand_string(word);
 
                 for arm in arms {
                     for pattern in &arm.patterns {
@@ -446,9 +461,9 @@ impl Shell {
         if expanded_args.is_empty() {
             for assign in assigns {
                 let value = self.expand_string(&assign.value);
-                self.vars.set(&assign.name, &value).map_err(|msg| {
-                    ShellError::Runtime { msg, span }
-                })?;
+                self.vars
+                    .set(&assign.name, &value)
+                    .map_err(|msg| ShellError::Runtime { msg, span })?;
             }
             return Ok(0);
         }
@@ -458,13 +473,14 @@ impl Shell {
         // Setup redirections before executing (applies to builtins, functions, externals)
         let saved_fds = self.setup_redirections(redirs)?;
 
-        let result = if let Some(status) = self.try_builtin(cmd_name, &expanded_args, assigns, &[], span)? {
-            Ok(status)
-        } else if let Some(func_body) = self.functions.get(cmd_name).cloned() {
-            self.eval_function(&func_body, &expanded_args, assigns, &[], span)
-        } else {
-            self.eval_external(&expanded_args, assigns, &[], span)
-        };
+        let result =
+            if let Some(status) = self.try_builtin(cmd_name, &expanded_args, assigns, &[], span)? {
+                Ok(status)
+            } else if let Some(func_body) = self.functions.get(cmd_name).cloned() {
+                self.eval_function(&func_body, &expanded_args, assigns, &[], span)
+            } else {
+                self.eval_external(&expanded_args, assigns, &[], span)
+            };
 
         self.restore_redirections(saved_fds);
         result
@@ -475,7 +491,7 @@ impl Shell {
         &mut self,
         name: &str,
         args: &[String],
-        assigns: &[Assignment],
+        _assigns: &[Assignment],
         redirs: &[Redir],
         span: Span,
     ) -> crate::error::Result<Option<i32>> {
@@ -484,24 +500,28 @@ impl Shell {
             "false" => Some(1),
             "echo" => Some(self.builtin_echo(args)),
             "cd" => Some(self.builtin_cd(args)),
-            "pwd" => {
-                match std::env::current_dir() {
-                    Ok(p) => {
-                        write_stdout(&format!("{}\n", p.display()));
-                        Some(0)
-                    }
-                    Err(e) => {
-                        eprintln!("pwd: {e}");
-                        Some(1)
-                    }
+            "pwd" => match std::env::current_dir() {
+                Ok(p) => {
+                    write_stdout(&format!("{}\n", p.display()));
+                    Some(0)
                 }
-            }
+                Err(e) => {
+                    eprintln!("pwd: {e}");
+                    Some(1)
+                }
+            },
             "exit" => {
-                let code = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(self.exit_status);
+                let code = args
+                    .get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(self.exit_status);
                 return Err(ShellError::Exit(code));
             }
             "return" => {
-                let code = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(self.exit_status);
+                let code = args
+                    .get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(self.exit_status);
                 return Err(ShellError::Return(code));
             }
             "break" => {
@@ -512,8 +532,11 @@ impl Shell {
                             return Err(ShellError::Exit(1));
                         }
                         Ok(n) => {
-                            if self.loop_depth == 0 { Some(0) }
-                            else { return Err(ShellError::Break(n.min(self.loop_depth))); }
+                            if self.loop_depth == 0 {
+                                Some(0)
+                            } else {
+                                return Err(ShellError::Break(n.min(self.loop_depth)));
+                            }
                         }
                         Err(_) => {
                             eprintln!("break: Illegal number: {arg}");
@@ -534,8 +557,11 @@ impl Shell {
                             return Err(ShellError::Exit(1));
                         }
                         Ok(n) => {
-                            if self.loop_depth == 0 { Some(0) }
-                            else { return Err(ShellError::Continue(n.min(self.loop_depth))); }
+                            if self.loop_depth == 0 {
+                                Some(0)
+                            } else {
+                                return Err(ShellError::Continue(n.min(self.loop_depth)));
+                            }
                         }
                         Err(_) => {
                             eprintln!("continue: Illegal number: {arg}");
@@ -579,7 +605,7 @@ impl Shell {
         args: &[String],
         assigns: &[Assignment],
         redirs: &[Redir],
-        span: Span,
+        _span: Span,
     ) -> crate::error::Result<i32> {
         // Save and set positional parameters
         let saved_positional = self.vars.positional.clone();
@@ -619,7 +645,7 @@ impl Shell {
         args: &[String],
         assigns: &[Assignment],
         redirs: &[Redir],
-        span: Span,
+        _span: Span,
     ) -> crate::error::Result<i32> {
         let saved = self.setup_redirections(redirs)?;
 
@@ -743,11 +769,7 @@ impl Shell {
     }
 
     /// Execute a command in a subshell (fork).
-    fn eval_in_subshell(
-        &mut self,
-        body: &Command,
-        redirs: &[Redir],
-    ) -> crate::error::Result<i32> {
+    fn eval_in_subshell(&mut self, body: &Command, redirs: &[Redir]) -> crate::error::Result<i32> {
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -756,7 +778,7 @@ impl Shell {
 
             if pid == 0 {
                 // Child
-                let saved = match self.setup_redirections(redirs) {
+                let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
                     Err(_) => sys::exit_child(1),
                 };
@@ -780,11 +802,7 @@ impl Shell {
     }
 
     /// Execute a command in the background.
-    fn eval_background(
-        &mut self,
-        cmd: &Command,
-        redirs: &[Redir],
-    ) -> crate::error::Result<i32> {
+    fn eval_background(&mut self, cmd: &Command, redirs: &[Redir]) -> crate::error::Result<i32> {
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -792,7 +810,7 @@ impl Shell {
             }
 
             if pid == 0 {
-                let saved = match self.setup_redirections(redirs) {
+                let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
                     Err(_) => sys::exit_child(1),
                 };
@@ -819,11 +837,7 @@ impl Shell {
             // Save the current fd
             let saved_copy = unsafe {
                 let copy = sys::fcntl_dupfd_cloexec(target_fd, 10);
-                if copy >= 0 {
-                    Some(copy as RawFd)
-                } else {
-                    None
-                }
+                if copy >= 0 { Some(copy) } else { None }
             };
 
             saved.push(SavedFd {
@@ -839,7 +853,7 @@ impl Shell {
                         ShellError::Io(e)
                     })?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), target_fd as i32);
+                        sys::dup2(file.as_raw_fd(), target_fd);
                     }
                 }
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
@@ -849,13 +863,14 @@ impl Shell {
                         ShellError::Io(e)
                     })?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), target_fd as i32);
+                        sys::dup2(file.as_raw_fd(), target_fd);
                     }
                 }
                 RedirKind::Append(word) => {
                     let filename = self.expand_string(word);
                     let file = std::fs::OpenOptions::new()
                         .create(true)
+                        .truncate(false)
                         .append(true)
                         .open(&filename)
                         .map_err(|e| {
@@ -863,7 +878,7 @@ impl Shell {
                             ShellError::Io(e)
                         })?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), target_fd as i32);
+                        sys::dup2(file.as_raw_fd(), target_fd);
                     }
                 }
                 RedirKind::ReadWrite(word) => {
@@ -872,24 +887,25 @@ impl Shell {
                         .read(true)
                         .write(true)
                         .create(true)
+                        .truncate(false)
                         .open(&filename)
                         .map_err(|e| {
                             eprintln!("{filename}: {e}");
                             ShellError::Io(e)
                         })?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), target_fd as i32);
+                        sys::dup2(file.as_raw_fd(), target_fd);
                     }
                 }
                 RedirKind::DupInput(word) | RedirKind::DupOutput(word) => {
                     let fd_str = self.expand_string(word);
                     if fd_str == "-" {
                         unsafe {
-                            sys::close(target_fd as i32);
+                            sys::close(target_fd);
                         }
                     } else if let Ok(source_fd) = fd_str.parse::<i32>() {
                         unsafe {
-                            sys::dup2(source_fd, target_fd as i32);
+                            sys::dup2(source_fd, target_fd);
                         }
                     } else {
                         return Err(ShellError::Runtime {
@@ -920,7 +936,7 @@ impl Shell {
                     drop(write_end);
 
                     unsafe {
-                        sys::dup2(read_fd, target_fd as i32);
+                        sys::dup2(read_fd, target_fd);
                         sys::close(read_fd);
                     }
                 }
@@ -935,7 +951,7 @@ impl Shell {
         for s in saved.into_iter().rev() {
             if let Some(copy) = s.saved_copy {
                 unsafe {
-                    sys::dup2(copy, s.target_fd as i32);
+                    sys::dup2(copy, s.target_fd);
                     sys::close(copy);
                 }
             }
@@ -1325,7 +1341,8 @@ impl Shell {
                     // Last variable gets the rest
                     let rest: String = chars[pos..].iter().collect();
                     // Trim trailing IFS whitespace
-                    let trimmed = rest.trim_end_matches(|c: char| ifs.contains(c) && c.is_whitespace());
+                    let trimmed =
+                        rest.trim_end_matches(|c: char| ifs.contains(c) && c.is_whitespace());
                     fields.push(trimmed.to_string());
                 } else {
                     // Accumulate until next IFS char
@@ -1367,7 +1384,7 @@ impl Shell {
         &mut self,
         args: &[String],
         redirs: &[Redir],
-        span: Span,
+        _span: Span,
     ) -> crate::error::Result<i32> {
         // Apply redirections to the shell itself (no save/restore)
         for redir in redirs {
@@ -1377,7 +1394,7 @@ impl Shell {
                     let filename = self.expand_string(word);
                     let file = std::fs::File::open(&filename)?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), redir.fd as i32);
+                        sys::dup2(file.as_raw_fd(), redir.fd);
                     }
                     std::mem::forget(file);
                 }
@@ -1385,7 +1402,7 @@ impl Shell {
                     let filename = self.expand_string(word);
                     let file = std::fs::File::create(&filename)?;
                     unsafe {
-                        sys::dup2(file.as_raw_fd(), redir.fd as i32);
+                        sys::dup2(file.as_raw_fd(), redir.fd);
                     }
                     std::mem::forget(file);
                 }
@@ -1485,12 +1502,16 @@ impl Shell {
     fn builtin_umask(&self, args: &[String]) -> i32 {
         if args.len() <= 1 {
             let mask = unsafe { sys::umask(0) };
-            unsafe { sys::umask(mask); }
+            unsafe {
+                sys::umask(mask);
+            }
             write_stdout(&format!("{mask:04o}\n"));
             return 0;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
-            unsafe { sys::umask(mask); }
+            unsafe {
+                sys::umask(mask);
+            }
             0
         } else {
             eprintln!("umask: {}: invalid mask", args[1]);
@@ -1511,7 +1532,9 @@ impl Shell {
             self.vars.positional.clone()
         };
 
-        let optind: usize = self.vars.get("OPTIND")
+        let optind: usize = self
+            .vars
+            .get("OPTIND")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
 
@@ -1530,7 +1553,9 @@ impl Shell {
         let arg_chars: Vec<char> = arg.chars().collect();
 
         // Track position within the current arg (for grouped short opts)
-        let optpos: usize = self.vars.get("_OPTPOS")
+        let optpos: usize = self
+            .vars
+            .get("_OPTPOS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
 
@@ -1624,7 +1649,8 @@ impl Shell {
                         '0' => {
                             i += 1;
                             let start = i;
-                            while i < fmt_chars.len() && i < start + 3
+                            while i < fmt_chars.len()
+                                && i < start + 3
                                 && matches!(fmt_chars[i], '0'..='7')
                             {
                                 i += 1;
@@ -1634,7 +1660,10 @@ impl Shell {
                             out.push(n as char);
                             continue;
                         }
-                        c => { out.push('\\'); out.push(c); }
+                        c => {
+                            out.push('\\');
+                            out.push(c);
+                        }
                     }
                     i += 1;
                 } else {
@@ -1667,7 +1696,9 @@ impl Shell {
                     }
                     precision = Some(prec.parse::<usize>().unwrap_or(0));
                 }
-                if i >= fmt_chars.len() { break; }
+                if i >= fmt_chars.len() {
+                    break;
+                }
                 let conv = fmt_chars[i];
                 i += 1;
                 let left_align = flags.contains('-');
@@ -1676,36 +1707,64 @@ impl Shell {
                     's' => {
                         let val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
                         arg_idx += 1;
-                        let val = if let Some(p) = precision { &val[..val.len().min(p)] } else { val };
-                        if left_align { let _ = write!(out, "{val:<width$}"); }
-                        else { let _ = write!(out, "{val:>width$}"); }
+                        let val = if let Some(p) = precision {
+                            &val[..val.len().min(p)]
+                        } else {
+                            val
+                        };
+                        if left_align {
+                            let _ = write!(out, "{val:<width$}");
+                        } else {
+                            let _ = write!(out, "{val:>width$}");
+                        }
                     }
                     'd' | 'i' => {
-                        let val = args.get(arg_idx).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                        let val = args
+                            .get(arg_idx)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
                         arg_idx += 1;
-                        if zero_pad { let _ = write!(out, "{val:0>width$}"); }
-                        else if left_align { let _ = write!(out, "{val:<width$}"); }
-                        else { let _ = write!(out, "{val:>width$}"); }
+                        if zero_pad {
+                            let _ = write!(out, "{val:0>width$}");
+                        } else if left_align {
+                            let _ = write!(out, "{val:<width$}");
+                        } else {
+                            let _ = write!(out, "{val:>width$}");
+                        }
                     }
                     'o' => {
-                        let val = args.get(arg_idx).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                        let val = args
+                            .get(arg_idx)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
                         arg_idx += 1;
                         let _ = write!(out, "{val:o}");
                     }
                     'x' => {
-                        let val = args.get(arg_idx).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                        let val = args
+                            .get(arg_idx)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
                         arg_idx += 1;
                         let _ = write!(out, "{val:x}");
                     }
                     'X' => {
-                        let val = args.get(arg_idx).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                        let val = args
+                            .get(arg_idx)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
                         arg_idx += 1;
                         let _ = write!(out, "{val:X}");
                     }
                     'c' => {
-                        let val = args.get(arg_idx).and_then(|s| s.chars().next()).unwrap_or('\0');
+                        let val = args
+                            .get(arg_idx)
+                            .and_then(|s| s.chars().next())
+                            .unwrap_or('\0');
                         arg_idx += 1;
-                        if val != '\0' { out.push(val); }
+                        if val != '\0' {
+                            out.push(val);
+                        }
                     }
                     '%' => out.push('%'),
                     'b' => {
@@ -1713,7 +1772,10 @@ impl Shell {
                         arg_idx += 1;
                         out.push_str(&unescape_echo(val));
                     }
-                    c => { out.push('%'); out.push(c); }
+                    c => {
+                        out.push('%');
+                        out.push(c);
+                    }
                 }
             } else {
                 out.push(fmt_chars[i]);
@@ -1784,7 +1846,11 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
 
     // Binary operators (check if next token is binary op)
     if *pos + 2 <= args.len() {
-        let maybe_op = if *pos + 1 < args.len() { args[*pos + 1] } else { "" };
+        let maybe_op = if *pos + 1 < args.len() {
+            args[*pos + 1]
+        } else {
+            ""
+        };
         match maybe_op {
             "=" | "==" => {
                 let left = args[*pos];
@@ -1840,7 +1906,14 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
                 // File comparison operators
                 let left = args[*pos];
                 *pos += 2;
-                let right = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { *pos += 1; "" };
+                let right = if *pos < args.len() {
+                    let r = args[*pos];
+                    *pos += 1;
+                    r
+                } else {
+                    *pos += 1;
+                    ""
+                };
                 let lm = std::fs::metadata(left).ok();
                 let rm = std::fs::metadata(right).ok();
                 return match maybe_op {
@@ -1872,41 +1945,84 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
     // (and the operand isn't a closing paren or binary op)
     let op = args[*pos];
     let has_operand = *pos + 1 < args.len()
-        && !matches!(args[*pos + 1], ")" | "-a" | "-o" | "=" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge");
+        && !matches!(
+            args[*pos + 1],
+            ")" | "-a" | "-o" | "=" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge"
+        );
     match op {
         "-n" if has_operand => {
             *pos += 1;
-            let s = args[*pos]; *pos += 1;
+            let s = args[*pos];
+            *pos += 1;
             !s.is_empty()
         }
         "-z" if has_operand => {
             *pos += 1;
-            let s = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let s = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             s.is_empty()
         }
         "-e" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             std::path::Path::new(p).exists()
         }
         "-f" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             std::path::Path::new(p).is_file()
         }
         "-d" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             std::path::Path::new(p).is_dir()
         }
         "-L" | "-h" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
-            std::path::Path::new(p).symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false)
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
+            std::path::Path::new(p)
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
         }
         "-r" | "-w" | "-x" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::MetadataExt;
             let uid = unsafe { sys::getuid() };
             match std::fs::metadata(p) {
@@ -1914,9 +2030,27 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
                     let mode = m.mode();
                     let is_owner = m.uid() == uid;
                     match op {
-                        "-r" => if is_owner { mode & 0o400 != 0 } else { mode & 0o004 != 0 },
-                        "-w" => if is_owner { mode & 0o200 != 0 } else { mode & 0o002 != 0 },
-                        "-x" => if is_owner { mode & 0o100 != 0 } else { mode & 0o001 != 0 },
+                        "-r" => {
+                            if is_owner {
+                                mode & 0o400 != 0
+                            } else {
+                                mode & 0o004 != 0
+                            }
+                        }
+                        "-w" => {
+                            if is_owner {
+                                mode & 0o200 != 0
+                            } else {
+                                mode & 0o002 != 0
+                            }
+                        }
+                        "-x" => {
+                            if is_owner {
+                                mode & 0o100 != 0
+                            } else {
+                                mode & 0o001 != 0
+                            }
+                        }
                         _ => false,
                     }
                 }
@@ -1925,56 +2059,124 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
         }
         "-s" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
         }
         "-t" if has_operand => {
             *pos += 1;
-            let fd = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "1" };
+            let fd = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                "1"
+            };
             let fd = fd.parse::<i32>().unwrap_or(1);
             unsafe { sys::isatty(fd) != 0 }
         }
         "-p" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::FileTypeExt;
-            std::fs::metadata(p).map(|m| m.file_type().is_fifo()).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.file_type().is_fifo())
+                .unwrap_or(false)
         }
         "-b" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::FileTypeExt;
-            std::fs::metadata(p).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.file_type().is_block_device())
+                .unwrap_or(false)
         }
         "-c" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::FileTypeExt;
-            std::fs::metadata(p).map(|m| m.file_type().is_char_device()).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.file_type().is_char_device())
+                .unwrap_or(false)
         }
         "-S" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::FileTypeExt;
-            std::fs::metadata(p).map(|m| m.file_type().is_socket()).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.file_type().is_socket())
+                .unwrap_or(false)
         }
         "-u" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(p).map(|m| m.mode() & 0o4000 != 0).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.mode() & 0o4000 != 0)
+                .unwrap_or(false)
         }
         "-g" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(p).map(|m| m.mode() & 0o2000 != 0).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.mode() & 0o2000 != 0)
+                .unwrap_or(false)
         }
         "-k" if has_operand => {
             *pos += 1;
-            let p = if *pos < args.len() { let r = args[*pos]; *pos += 1; r } else { "" };
+            let p = if *pos < args.len() {
+                let r = args[*pos];
+                *pos += 1;
+                r
+            } else {
+                ""
+            };
             use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(p).map(|m| m.mode() & 0o1000 != 0).unwrap_or(false)
+            std::fs::metadata(p)
+                .map(|m| m.mode() & 0o1000 != 0)
+                .unwrap_or(false)
         }
         _ => {
             // Bare string: true if non-empty
@@ -1984,20 +2186,38 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
     }
 }
 
-fn int_cmp(a: &str, b: &str, f: impl Fn(i64, i64) -> bool) -> i32 {
-    let a = a.parse::<i64>().unwrap_or(0);
-    let b = b.parse::<i64>().unwrap_or(0);
-    if f(a, b) { 0 } else { 1 }
-}
-
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        ":" | "true" | "false" | "echo" | "cd" | "pwd" | "exit" | "return"
-            | "break" | "continue" | "export" | "readonly" | "unset"
-            | "set" | "shift" | "eval" | "." | "source" | "test" | "["
-            | "read" | "local" | "exec" | "command" | "type" | "wait"
-            | "trap" | "umask" | "getopts" | "printf"
+        ":" | "true"
+            | "false"
+            | "echo"
+            | "cd"
+            | "pwd"
+            | "exit"
+            | "return"
+            | "break"
+            | "continue"
+            | "export"
+            | "readonly"
+            | "unset"
+            | "set"
+            | "shift"
+            | "eval"
+            | "."
+            | "source"
+            | "test"
+            | "["
+            | "read"
+            | "local"
+            | "exec"
+            | "command"
+            | "type"
+            | "wait"
+            | "trap"
+            | "umask"
+            | "getopts"
+            | "printf"
     )
 }
 
@@ -2017,13 +2237,6 @@ fn which(name: &str) -> Result<String, ()> {
 fn write_stdout(s: &str) {
     unsafe {
         sys::write(1, s.as_ptr() as *const _, s.len());
-    }
-}
-
-/// Write a string directly to fd 2.
-fn write_stderr(s: &str) {
-    unsafe {
-        sys::write(2, s.as_ptr() as *const _, s.len());
     }
 }
 

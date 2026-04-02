@@ -105,8 +105,7 @@ impl Parser {
                 Self::patch_heredocs_inner(l, bodies, idx);
                 Self::patch_heredocs_inner(r, bodies, idx);
             }
-            Command::Subshell { body, redirs, .. }
-            | Command::BraceGroup { body, redirs, .. } => {
+            Command::Subshell { body, redirs, .. } | Command::BraceGroup { body, redirs, .. } => {
                 Self::patch_heredocs_inner(body, bodies, idx);
                 for redir in redirs.iter_mut() {
                     if *idx < bodies.len() {
@@ -351,7 +350,7 @@ impl Parser {
                 }
                 // After command name, assignment tokens are treated as regular args
                 // (e.g., `local X=value`, `export FOO=bar`)
-                Token::Assignment { ref name, ref value } if !args.is_empty() => {
+                Token::Assignment { name, value } if !args.is_empty() => {
                     self.next()?;
                     let text = format!("{name}={value}");
                     args.push(self.raw_word_to_ast(&text, tok_span));
@@ -359,10 +358,22 @@ impl Parser {
                 // Reserved words used as arguments (after command name)
                 tok if args.is_empty() && !tok.is_redir() => break,
                 // After we have a command name, reserved words become regular words
-                Token::If | Token::Then | Token::Else | Token::Elif | Token::Fi
-                | Token::Do | Token::Done | Token::Case | Token::Esac
-                | Token::While | Token::Until | Token::For | Token::In
-                | Token::Lbrace | Token::Rbrace | Token::Bang
+                Token::If
+                | Token::Then
+                | Token::Else
+                | Token::Elif
+                | Token::Fi
+                | Token::Do
+                | Token::Done
+                | Token::Case
+                | Token::Esac
+                | Token::While
+                | Token::Until
+                | Token::For
+                | Token::In
+                | Token::Lbrace
+                | Token::Rbrace
+                | Token::Bang
                     if !args.is_empty() =>
                 {
                     self.next()?;
@@ -398,11 +409,7 @@ impl Parser {
     }
 
     /// Parse a redirection after the operator token has been consumed.
-    fn parse_redir_after_op(
-        &mut self,
-        op: &Token,
-        span: Span,
-    ) -> Result<Redir, ShellError> {
+    fn parse_redir_after_op(&mut self, op: &Token, span: Span) -> Result<Redir, ShellError> {
         // Default fd: 0 for input, 1 for output
         let fd = match op {
             Token::Less | Token::DLess | Token::DLessDash | Token::LessAnd | Token::LessGreat => 0,
@@ -422,14 +429,13 @@ impl Parser {
                         return Err(ShellError::Syntax {
                             msg: format!("expected here-doc delimiter, got {other:?}"),
                             span: delim_span,
-                        })
+                        });
                     }
                 };
 
                 // Determine if the delimiter is quoted (any quoting means no expansion)
-                let quoted = delim_raw.contains('\'')
-                    || delim_raw.contains('"')
-                    || delim_raw.contains('\\');
+                let quoted =
+                    delim_raw.contains('\'') || delim_raw.contains('"') || delim_raw.contains('\\');
                 let delimiter = strip_quotes(&delim_raw);
 
                 self.lexer.pending_heredocs.push(PendingHereDoc {
@@ -494,7 +500,6 @@ impl Parser {
             }
         }
     }
-
 
     // ── Compound commands ────────────────────────────────────────────
 
@@ -696,7 +701,7 @@ impl Parser {
                 return Err(ShellError::Syntax {
                     msg: format!("expected variable name after 'for', got {other:?}"),
                     span: name_span,
-                })
+                });
             }
         };
 
@@ -770,7 +775,7 @@ impl Parser {
                 return Err(ShellError::Syntax {
                     msg: format!("expected word after 'case', got {other:?}"),
                     span: word_span,
-                })
+                });
             }
         };
 
@@ -1078,7 +1083,11 @@ fn parse_dollar(chars: &[char], i: &mut usize, in_dquote: bool) -> Option<WordPa
                 let mut content = Vec::new();
                 let mut depth = 1u32;
                 while *i < chars.len() {
-                    if chars[*i] == ')' && *i + 1 < chars.len() && chars[*i + 1] == ')' && depth == 1 {
+                    if chars[*i] == ')'
+                        && *i + 1 < chars.len()
+                        && chars[*i + 1] == ')'
+                        && depth == 1
+                    {
                         *i += 2;
                         break;
                     } else if chars[*i] == '(' {
@@ -1182,8 +1191,8 @@ fn parse_brace_param(chars: &[char], i: &mut usize, in_dquote: bool) -> WordPart
     }
 
     // ${#var} — length
-    let length = *i < chars.len() && chars[*i] == '#'
-        && *i + 1 < chars.len() && chars[*i + 1] != '}';
+    let length =
+        *i < chars.len() && chars[*i] == '#' && *i + 1 < chars.len() && chars[*i + 1] != '}';
     if length {
         *i += 1;
     }
@@ -1377,11 +1386,11 @@ fn read_brace_word(chars: &[char], i: &mut usize, in_dquote: bool) -> Vec<WordPa
 fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
     let mut result = Vec::with_capacity(parts.len());
     for part in parts {
-        if let WordPart::Literal(ref s) = part {
-            if let Some(WordPart::Literal(ref mut prev)) = result.last_mut() {
-                prev.push_str(s);
-                continue;
-            }
+        if let WordPart::Literal(ref s) = part
+            && let Some(WordPart::Literal(prev)) = result.last_mut()
+        {
+            prev.push_str(s);
+            continue;
         }
         result.push(part);
     }
@@ -1517,7 +1526,6 @@ mod tests {
     fn parse(src: &str) -> Program {
         Parser::new(src).parse().unwrap()
     }
-
 
     #[test]
     fn simple_command() {

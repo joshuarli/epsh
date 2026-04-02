@@ -23,7 +23,12 @@
 
 use crate::var::Variables;
 
-pub fn eval_arith(expr: &str, vars: &mut Variables, exit_status: i32, shell_pid: u32) -> Result<i64, String> {
+pub fn eval_arith(
+    expr: &str,
+    vars: &mut Variables,
+    exit_status: i32,
+    shell_pid: u32,
+) -> Result<i64, String> {
     let tokens = tokenize(expr)?;
     let mut parser = ArithParser {
         tokens,
@@ -50,34 +55,34 @@ enum ArithToken {
     Percent,
     LParen,
     RParen,
-    Eq,       // ==
-    Ne,       // !=
+    Eq, // ==
+    Ne, // !=
     Lt,
-    Le,       // <=
+    Le, // <=
     Gt,
-    Ge,       // >=
-    And,      // &&
-    Or,       // ||
-    BitAnd,   // &
-    BitOr,    // |
-    BitXor,   // ^
-    Shl,      // <<
-    Shr,      // >>
-    Not,      // !
-    BitNot,   // ~
-    Assign,   // =
-    Question, // ?
-    Colon,    // :
-    AddAssign,    // +=
-    SubAssign,    // -=
-    MulAssign,    // *=
-    DivAssign,    // /=
-    ModAssign,    // %=
-    ShlAssign,    // <<=
-    ShrAssign,    // >>=
-    AndAssign,    // &=
-    OrAssign,     // |=
-    XorAssign,    // ^=
+    Ge,        // >=
+    And,       // &&
+    Or,        // ||
+    BitAnd,    // &
+    BitOr,     // |
+    BitXor,    // ^
+    Shl,       // <<
+    Shr,       // >>
+    Not,       // !
+    BitNot,    // ~
+    Assign,    // =
+    Question,  // ?
+    Colon,     // :
+    AddAssign, // +=
+    SubAssign, // -=
+    MulAssign, // *=
+    DivAssign, // /=
+    ModAssign, // %=
+    ShlAssign, // <<=
+    ShrAssign, // >>=
+    AndAssign, // &=
+    OrAssign,  // |=
+    XorAssign, // ^=
 }
 
 fn tokenize(expr: &str) -> Result<Vec<ArithToken>, String> {
@@ -123,7 +128,9 @@ fn tokenize(expr: &str) -> Result<Vec<ArithToken>, String> {
                     i += 1;
                 }
                 let s: String = chars[start..i].iter().collect();
-                let n = s.parse::<i64>().map_err(|_| format!("invalid number: {s}"))?;
+                let n = s
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid number: {s}"))?;
                 tokens.push(ArithToken::Num(n));
             }
             c if c == '_' || c.is_ascii_alphabetic() => {
@@ -179,8 +186,14 @@ fn tokenize(expr: &str) -> Result<Vec<ArithToken>, String> {
                     tokens.push(ArithToken::Percent);
                 }
             }
-            '(' => { i += 1; tokens.push(ArithToken::LParen); }
-            ')' => { i += 1; tokens.push(ArithToken::RParen); }
+            '(' => {
+                i += 1;
+                tokens.push(ArithToken::LParen);
+            }
+            ')' => {
+                i += 1;
+                tokens.push(ArithToken::RParen);
+            }
             '=' => {
                 i += 1;
                 if i < chars.len() && chars[i] == '=' {
@@ -266,9 +279,18 @@ fn tokenize(expr: &str) -> Result<Vec<ArithToken>, String> {
                     tokens.push(ArithToken::BitXor);
                 }
             }
-            '~' => { i += 1; tokens.push(ArithToken::BitNot); }
-            '?' => { i += 1; tokens.push(ArithToken::Question); }
-            ':' => { i += 1; tokens.push(ArithToken::Colon); }
+            '~' => {
+                i += 1;
+                tokens.push(ArithToken::BitNot);
+            }
+            '?' => {
+                i += 1;
+                tokens.push(ArithToken::Question);
+            }
+            ':' => {
+                i += 1;
+                tokens.push(ArithToken::Colon);
+            }
             c => return Err(format!("unexpected character in arithmetic: '{c}'")),
         }
     }
@@ -361,7 +383,9 @@ impl<'a> ArithParser<'a> {
                     ArithToken::DivAssign => {
                         self.pos += 1;
                         let right = self.parse_assignment()?;
-                        if right == 0 { return Err("division by zero".into()); }
+                        if right == 0 {
+                            return Err("division by zero".into());
+                        }
                         let val = self.get_var(&name) / right;
                         self.set_var(&name, val);
                         return Ok(val);
@@ -369,7 +393,9 @@ impl<'a> ArithParser<'a> {
                     ArithToken::ModAssign => {
                         self.pos += 1;
                         let right = self.parse_assignment()?;
-                        if right == 0 { return Err("division by zero".into()); }
+                        if right == 0 {
+                            return Err("division by zero".into());
+                        }
                         let val = self.get_var(&name) % right;
                         self.set_var(&name, val);
                         return Ok(val);
@@ -583,13 +609,17 @@ impl<'a> ArithParser<'a> {
                 Some(&ArithToken::Slash) => {
                     self.pos += 1;
                     let right = self.parse_unary()?;
-                    if right == 0 { return Err("division by zero".into()); }
+                    if right == 0 {
+                        return Err("division by zero".into());
+                    }
                     left /= right;
                 }
                 Some(&ArithToken::Percent) => {
                     self.pos += 1;
                     let right = self.parse_unary()?;
-                    if right == 0 { return Err("division by zero".into()); }
+                    if right == 0 {
+                        return Err("division by zero".into());
+                    }
                     left %= right;
                 }
                 _ => break,

@@ -11,27 +11,30 @@ pub enum Token {
     /// An assignment word: `name=value` at the start of a simple command.
     /// The lexer recognizes these so the parser can distinguish assignments
     /// from ordinary arguments.
-    Assignment { name: String, value: String },
+    Assignment {
+        name: String,
+        value: String,
+    },
 
     /// Operators
-    Newline,       // \n (significant in shell grammar)
-    Semi,          // ;
-    Amp,           // &
-    Pipe,          // |
-    And,           // &&
-    Or,            // ||
-    SemiSemi,      // ;; (case)
-    Less,          // <
-    Great,         // >
-    DLess,         // <<
-    DGreat,        // >>
-    LessAnd,      // <&
-    GreatAnd,     // >&
-    LessGreat,    // <>
-    DLessDash,    // <<-
-    Clobber,       // >|
-    LParen,        // (
-    RParen,        // )
+    Newline, // \n (significant in shell grammar)
+    Semi,      // ;
+    Amp,       // &
+    Pipe,      // |
+    And,       // &&
+    Or,        // ||
+    SemiSemi,  // ;; (case)
+    Less,      // <
+    Great,     // >
+    DLess,     // <<
+    DGreat,    // >>
+    LessAnd,   // <&
+    GreatAnd,  // >&
+    LessGreat, // <>
+    DLessDash, // <<-
+    Clobber,   // >|
+    LParen,    // (
+    RParen,    // )
 
     /// Reserved words (recognized when expected by grammar)
     If,
@@ -47,9 +50,9 @@ pub enum Token {
     Until,
     For,
     In,
-    Lbrace,  // {
-    Rbrace,  // }
-    Bang,    // !
+    Lbrace, // {
+    Rbrace, // }
+    Bang,   // !
 
     /// End of input
     Eof,
@@ -302,10 +305,7 @@ impl Lexer {
 
     /// Read a word token. Handles quoting (single, double, backslash),
     /// and IO_NUMBER detection (digits before < or >).
-    fn read_word(
-        &mut self,
-        span: Span,
-    ) -> std::result::Result<(Token, Span), ShellError> {
+    fn read_word(&mut self, span: Span) -> std::result::Result<(Token, Span), ShellError> {
         let mut word = String::new();
 
         loop {
@@ -416,10 +416,10 @@ impl Lexer {
         }
 
         // Check for reserved words
-        if self.recognize_reserved {
-            if let Some(tok) = Self::reserved_word(&word) {
-                return Ok((tok, span));
-            }
+        if self.recognize_reserved
+            && let Some(tok) = Self::reserved_word(&word)
+        {
+            return Ok((tok, span));
         }
 
         // Check for assignment words: name=value where name is a valid
@@ -663,11 +663,7 @@ impl Lexer {
     }
 
     /// Read `$((...))` arithmetic content after the opening `((`.
-    fn read_arith(
-        &mut self,
-        word: &mut String,
-        span: Span,
-    ) -> std::result::Result<(), ShellError> {
+    fn read_arith(&mut self, word: &mut String, span: Span) -> std::result::Result<(), ShellError> {
         // Need to find matching ))
         let mut depth = 1u32;
         loop {
@@ -731,7 +727,10 @@ impl Lexer {
     ///
     /// Reads lines until the delimiter is found alone on a line.
     /// If `strip_tabs`, leading tabs are removed from each line.
-    pub fn read_heredoc_body(&mut self, heredoc: &PendingHereDoc) -> std::result::Result<String, ShellError> {
+    pub fn read_heredoc_body(
+        &mut self,
+        heredoc: &PendingHereDoc,
+    ) -> std::result::Result<String, ShellError> {
         let mut body = String::new();
         loop {
             // Read a line
@@ -825,31 +824,37 @@ mod tests {
 
     #[test]
     fn simple_command() {
-        assert_eq!(tokens("echo hello"), vec![
-            Token::Word("echo".into()),
-            Token::Word("hello".into()),
-        ]);
+        assert_eq!(
+            tokens("echo hello"),
+            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
+        );
     }
 
     #[test]
     fn pipeline() {
-        assert_eq!(tokens("ls | grep foo"), vec![
-            Token::Word("ls".into()),
-            Token::Pipe,
-            Token::Word("grep".into()),
-            Token::Word("foo".into()),
-        ]);
+        assert_eq!(
+            tokens("ls | grep foo"),
+            vec![
+                Token::Word("ls".into()),
+                Token::Pipe,
+                Token::Word("grep".into()),
+                Token::Word("foo".into()),
+            ]
+        );
     }
 
     #[test]
     fn and_or() {
-        assert_eq!(tokens("a && b || c"), vec![
-            Token::Word("a".into()),
-            Token::And,
-            Token::Word("b".into()),
-            Token::Or,
-            Token::Word("c".into()),
-        ]);
+        assert_eq!(
+            tokens("a && b || c"),
+            vec![
+                Token::Word("a".into()),
+                Token::And,
+                Token::Word("b".into()),
+                Token::Or,
+                Token::Word("c".into()),
+            ]
+        );
     }
 
     #[test]
@@ -857,81 +862,103 @@ mod tests {
         // "in" is a reserved word, so the lexer returns Token::In here.
         // The parser handles context: after a redir operator, it accepts
         // reserved words as filenames.
-        assert_eq!(tokens("cat < in > out 2>&1"), vec![
-            Token::Word("cat".into()),
-            Token::Less,
-            Token::In,
-            Token::Great,
-            Token::Word("out".into()),
-            Token::Word("2".into()),
-            Token::GreatAnd,
-            Token::Word("1".into()),
-        ]);
+        assert_eq!(
+            tokens("cat < in > out 2>&1"),
+            vec![
+                Token::Word("cat".into()),
+                Token::Less,
+                Token::In,
+                Token::Great,
+                Token::Word("out".into()),
+                Token::Word("2".into()),
+                Token::GreatAnd,
+                Token::Word("1".into()),
+            ]
+        );
     }
 
     #[test]
     fn redir_filename() {
         // Non-reserved filenames work fine
-        assert_eq!(tokens("cat < input.txt"), vec![
-            Token::Word("cat".into()),
-            Token::Less,
-            Token::Word("input.txt".into()),
-        ]);
+        assert_eq!(
+            tokens("cat < input.txt"),
+            vec![
+                Token::Word("cat".into()),
+                Token::Less,
+                Token::Word("input.txt".into()),
+            ]
+        );
     }
 
     #[test]
     fn single_quotes() {
-        assert_eq!(tokens("echo 'hello world'"), vec![
-            Token::Word("echo".into()),
-            Token::Word("'hello world'".into()),
-        ]);
+        assert_eq!(
+            tokens("echo 'hello world'"),
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("'hello world'".into()),
+            ]
+        );
     }
 
     #[test]
     fn double_quotes() {
-        assert_eq!(tokens(r#"echo "hello $name""#), vec![
-            Token::Word("echo".into()),
-            Token::Word("\"hello $name\"".into()),
-        ]);
+        assert_eq!(
+            tokens(r#"echo "hello $name""#),
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("\"hello $name\"".into()),
+            ]
+        );
     }
 
     #[test]
     fn command_substitution() {
-        assert_eq!(tokens("echo $(date)"), vec![
-            Token::Word("echo".into()),
-            Token::Word("$(date)".into()),
-        ]);
+        assert_eq!(
+            tokens("echo $(date)"),
+            vec![Token::Word("echo".into()), Token::Word("$(date)".into()),]
+        );
     }
 
     #[test]
     fn assignment() {
         let toks = tokens("FOO=bar");
-        assert_eq!(toks, vec![
-            Token::Assignment { name: "FOO".into(), value: "bar".into() },
-        ]);
+        assert_eq!(
+            toks,
+            vec![Token::Assignment {
+                name: "FOO".into(),
+                value: "bar".into()
+            },]
+        );
     }
 
     #[test]
     fn reserved_words() {
-        assert_eq!(tokens("if true; then echo yes; fi"), vec![
-            Token::If,
-            Token::Word("true".into()),
-            Token::Semi,
-            Token::Then,
-            Token::Word("echo".into()),
-            Token::Word("yes".into()),
-            Token::Semi,
-            Token::Fi,
-        ]);
+        assert_eq!(
+            tokens("if true; then echo yes; fi"),
+            vec![
+                Token::If,
+                Token::Word("true".into()),
+                Token::Semi,
+                Token::Then,
+                Token::Word("echo".into()),
+                Token::Word("yes".into()),
+                Token::Semi,
+                Token::Fi,
+            ]
+        );
     }
 
     #[test]
     fn background() {
-        assert_eq!(tokens("sleep 10 &"), vec![
-            Token::Word("sleep".into()),
-            Token::Word("10".into()),
-            Token::Amp,
-        ]);
+        assert_eq!(
+            tokens("sleep 10 &"),
+            vec![
+                Token::Word("sleep".into()),
+                Token::Word("10".into()),
+                Token::Amp,
+            ]
+        );
     }
 
     #[test]
@@ -941,41 +968,43 @@ mod tests {
 
     #[test]
     fn dollar_brace() {
-        assert_eq!(tokens("${var:-default}"), vec![
-            Token::Word("${var:-default}".into()),
-        ]);
+        assert_eq!(
+            tokens("${var:-default}"),
+            vec![Token::Word("${var:-default}".into()),]
+        );
     }
 
     #[test]
     fn arithmetic() {
-        assert_eq!(tokens("$((1+2))"), vec![
-            Token::Word("$((1+2))".into()),
-        ]);
+        assert_eq!(tokens("$((1+2))"), vec![Token::Word("$((1+2))".into()),]);
     }
 
     #[test]
     fn heredoc_operator() {
-        assert_eq!(tokens("cat << EOF"), vec![
-            Token::Word("cat".into()),
-            Token::DLess,
-            Token::Word("EOF".into()),
-        ]);
+        assert_eq!(
+            tokens("cat << EOF"),
+            vec![
+                Token::Word("cat".into()),
+                Token::DLess,
+                Token::Word("EOF".into()),
+            ]
+        );
     }
 
     #[test]
     fn comments() {
-        assert_eq!(tokens("echo hello # comment"), vec![
-            Token::Word("echo".into()),
-            Token::Word("hello".into()),
-        ]);
+        assert_eq!(
+            tokens("echo hello # comment"),
+            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
+        );
     }
 
     #[test]
     fn backslash_newline() {
-        assert_eq!(tokens("echo hel\\\nlo"), vec![
-            Token::Word("echo".into()),
-            Token::Word("hello".into()),
-        ]);
+        assert_eq!(
+            tokens("echo hel\\\nlo"),
+            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
+        );
     }
 
     #[test]

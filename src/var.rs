@@ -57,6 +57,12 @@ pub struct Variables {
     pub arg0: String,
 }
 
+impl Default for Variables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Variables {
     pub fn new() -> Self {
         let mut vars = HashMap::new();
@@ -97,17 +103,15 @@ impl Variables {
 
     /// Get a variable's value. Returns None if unset.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.vars
-            .get(name)
-            .and_then(|v| v.value.as_deref())
+        self.vars.get(name).and_then(|v| v.value.as_deref())
     }
 
     /// Set a variable. Returns Err if readonly.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), String> {
-        if let Some(existing) = self.vars.get(name) {
-            if existing.flags.has(VarFlags::READONLY) {
-                return Err(format!("{name}: readonly variable"));
-            }
+        if let Some(existing) = self.vars.get(name)
+            && existing.flags.has(VarFlags::READONLY)
+        {
+            return Err(format!("{name}: readonly variable"));
         }
 
         let entry = self.vars.entry(name.to_string()).or_insert_with(|| Var {
@@ -118,7 +122,7 @@ impl Variables {
 
         // Sync to process environment if exported
         if entry.flags.has(VarFlags::EXPORT) {
-            env::set_var(name, value);
+            unsafe { env::set_var(name, value) };
         }
 
         Ok(())
@@ -126,13 +130,13 @@ impl Variables {
 
     /// Unset a variable. Returns Err if readonly.
     pub fn unset(&mut self, name: &str) -> Result<(), String> {
-        if let Some(existing) = self.vars.get(name) {
-            if existing.flags.has(VarFlags::READONLY) {
-                return Err(format!("{name}: readonly variable"));
-            }
+        if let Some(existing) = self.vars.get(name)
+            && existing.flags.has(VarFlags::READONLY)
+        {
+            return Err(format!("{name}: readonly variable"));
         }
         self.vars.remove(name);
-        env::remove_var(name);
+        unsafe { env::remove_var(name) };
         Ok(())
     }
 
@@ -144,7 +148,7 @@ impl Variables {
         });
         entry.flags.set(VarFlags::EXPORT);
         if let Some(ref value) = entry.value {
-            env::set_var(name, value);
+            unsafe { env::set_var(name, value) };
         }
     }
 
