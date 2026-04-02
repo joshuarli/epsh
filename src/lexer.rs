@@ -608,9 +608,35 @@ impl Lexer {
         in_dquote: bool,
         span: Span,
     ) -> std::result::Result<WordPart, ShellError> {
-        // ${#var} — length prefix
-        let length = matches!(self.peek(), Some('#'))
-            && self.src.get(self.pos + 1).copied() != Some('}');
+        // ${#var} — length prefix. But ${##pattern} is $# with trim, not length of #.
+        // Mirrors dash parsesub lines 1400-1418.
+        let mut length = false;
+        if self.peek() == Some('#') {
+            let next = self.src.get(self.pos + 1).copied();
+            if let Some(n) = next {
+                if n == '_' || n.is_ascii_alphabetic() {
+                    // ${#name} — length of variable
+                    length = true;
+                } else if n == '}' {
+                    // ${#} — value of $# (not length)
+                    length = false;
+                } else if n == '#' || n == '?' || n == '-' || n == '!' || n == '$' || n == '@' || n == '*' {
+                    // ${##...} ${#?} etc — check if it's ${#X} or ${X op}
+                    // If char after the special param is }, it's length. Otherwise it's a param+op.
+                    let after = self.src.get(self.pos + 2).copied();
+                    if after == Some('}') {
+                        // ${#?} = length of $?
+                        length = true;
+                    } else {
+                        // ${##pat} = $# with trim
+                        length = false;
+                    }
+                } else if n.is_ascii_digit() {
+                    // ${#1} — length of $1
+                    length = true;
+                }
+            }
+        }
         if length {
             self.advance(); // consume #
         }
@@ -1531,7 +1557,16 @@ pub fn parts_to_text(parts: &[WordPart]) -> String {
             WordPart::DoubleQuoted(inner) => {
                 s.push_str(&parts_to_text(inner));
             }
-            _ => {} // non-text parts ignored for raw text extraction
+            WordPart::Param(p) => {
+                // Reconstruct source text for unexpanded params (used by heredoc delimiters)
+                s.push('$');
+                s.push_str(&p.name);
+            }
+            WordPart::Tilde(user) => {
+                s.push('~');
+                s.push_str(user);
+            }
+            _ => {} // CmdSubst, Backtick, Arith ignored
         }
     }
     s

@@ -599,8 +599,13 @@ impl Shell {
             }
             return ExitStatus::SUCCESS;
         }
-        let action = &args[1];
-        for sig_name in &args[2..] {
+        // Skip -- if present
+        let offset = if args[1] == "--" { 2 } else { 1 };
+        if args.len() <= offset {
+            return ExitStatus::SUCCESS;
+        }
+        let action = &args[offset];
+        for sig_name in &args[offset + 1..] {
             if action == "-" {
                 self.traps.remove(sig_name.as_str());
             } else {
@@ -716,7 +721,12 @@ impl Shell {
                 ExitStatus::SUCCESS
             }
             None => {
-                eprintln!("getopts: illegal option -- {opt}");
+                let silent = optstring.starts_with(':');
+                if silent {
+                    let _ = self.vars.set("OPTARG", &opt.to_string());
+                } else {
+                    eprintln!("getopts: illegal option -- {opt}");
+                }
                 let _ = self.vars.set(name, "?");
                 if optpos + 1 >= arg_chars.len() {
                     let _ = self.vars.set("OPTIND", &(optind + 1).to_string());
