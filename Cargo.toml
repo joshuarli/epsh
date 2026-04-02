@@ -3,3 +3,6 @@ name = "epsh"
 version = "0.1.0"
 edition = "2024"
 description = "Embeddable POSIX shell"
+
+[dependencies]
+libc = "0.2.184"

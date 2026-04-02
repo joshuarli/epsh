@@ -835,7 +835,7 @@ impl Shell {
             let target_fd = redir.fd;
 
             // Save the current fd
-            let saved_copy = unsafe {
+            let saved_copy = {
                 let copy = sys::fcntl_dupfd_cloexec(target_fd, 10);
                 if copy >= 0 { Some(copy) } else { None }
             };
@@ -1279,7 +1279,7 @@ impl Shell {
         let mut got_data = false;
         let mut continued = false;
         loop {
-            let n = unsafe { sys::read(0, buf.as_mut_ptr(), 1) };
+            let n = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
             if n <= 0 {
                 break; // EOF or error
             }
@@ -1294,7 +1294,7 @@ impl Shell {
             }
             if ch == '\\' && !raw_mode {
                 // Line continuation: peek at next char
-                let n2 = unsafe { sys::read(0, buf.as_mut_ptr(), 1) };
+                let n2 = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
                 if n2 <= 0 {
                     line.push('\\');
                     break;
@@ -1510,7 +1510,7 @@ impl Shell {
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
             unsafe {
-                sys::umask(mask);
+                sys::umask(mask as libc::mode_t);
             }
             0
         } else {
