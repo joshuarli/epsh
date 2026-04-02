@@ -502,7 +502,7 @@ impl Shell {
             // Same setup but don't save
             match &redir.kind {
                 RedirKind::Input(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::File::open(&filename)?;
                     unsafe {
                         sys::dup2(file.as_raw_fd(), redir.fd);
@@ -510,7 +510,7 @@ impl Shell {
                     std::mem::forget(file);
                 }
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::File::create(&filename)?;
                     unsafe {
                         sys::dup2(file.as_raw_fd(), redir.fd);

@@ -28,8 +28,6 @@ pub struct Shell {
     /// True when evaluating a condition (if test, while cond, && / || operands).
     /// Suppresses set -e (errexit). Mirrors dash's EV_TESTED flag.
     pub(crate) tested: bool,
-    /// Set by expansion when a fatal error occurs (bad substitution, etc.)
-    pub expand_error: bool,
 }
 
 #[derive(Debug, Default)]
@@ -59,7 +57,6 @@ impl Shell {
             opts: ShellOpts::default(),
             traps: HashMap::new(),
             tested: false,
-            expand_error: false,
         }
     }
 
@@ -85,11 +82,10 @@ impl Shell {
                 }
                 Err(e) => {
                     eprintln!("epsh: {e}");
-                    self.exit_status = ExitStatus::FAILURE;
-                    if self.opts.errexit {
-                        self.run_exit_trap();
-                        return 1;
-                    }
+                    self.exit_status = ExitStatus::MISUSE;
+                    // Non-interactive shell: most errors are fatal
+                    self.run_exit_trap();
+                    return self.exit_status.0;
                 }
             }
         }
@@ -139,7 +135,7 @@ impl Shell {
     }
 
     /// Expand a word to a list of fields (with field splitting and globbing).
-    pub(crate) fn expand_fields(&mut self, word: &Word) -> Vec<String> {
+    pub(crate) fn expand_fields(&mut self, word: &Word) -> crate::error::Result<Vec<String>> {
         // Use a raw pointer to self for the cmd_subst closure.
         // This is safe because command_subst forks — the child gets its own
         // copy of all data, and the parent only reads from a pipe.
@@ -159,7 +155,7 @@ impl Shell {
     }
 
     /// Expand a word to a single string (no field splitting or globbing).
-    pub(crate) fn expand_string(&mut self, word: &Word) -> String {
+    pub(crate) fn expand_string(&mut self, word: &Word) -> crate::error::Result<String> {
         let self_ptr = self as *mut Shell;
         let mut cmd_fn = |cmd: &Command| -> String {
             let shell = unsafe { &mut *self_ptr };
@@ -374,7 +370,7 @@ impl Shell {
                 let word_list = if let Some(words) = words {
                     let mut expanded = Vec::new();
                     for w in words {
-                        expanded.extend(self.expand_fields(w));
+                        expanded.extend(self.expand_fields(w)?);
                     }
                     expanded
                 } else {
@@ -409,11 +405,11 @@ impl Shell {
             }
 
             Command::Case { word, arms, .. } => {
-                let expanded = self.expand_string(word);
+                let expanded = self.expand_string(word)?;
 
                 for arm in arms {
                     for pattern in &arm.patterns {
-                        let pat = self.expand_string(pattern);
+                        let pat = self.expand_string(pattern)?;
                         if glob::fnmatch(&pat, &expanded) {
                             if let Some(ref body) = arm.body {
                                 return self.eval_command(body);
@@ -457,13 +453,13 @@ impl Shell {
         // Expand arguments
         let mut expanded_args: Vec<String> = Vec::new();
         for arg in args {
-            expanded_args.extend(self.expand_fields(arg));
+            expanded_args.extend(self.expand_fields(arg)?);
         }
 
         // No command name: just apply assignments to the shell environment
         if expanded_args.is_empty() {
             for assign in assigns {
-                let value = self.expand_string(&assign.value);
+                let value = self.expand_string(&assign.value)?;
                 self.vars
                     .set(&assign.name, &value)
                     .map_err(|msg| ShellError::Runtime { msg, span })?;
@@ -507,7 +503,7 @@ impl Shell {
 
         // Apply temporary assignments
         for assign in assigns {
-            let value = self.expand_string(&assign.value);
+            let value = self.expand_string(&assign.value)?;
             self.vars.make_local(&assign.name);
             let _ = self.vars.set(&assign.name, &value);
         }
@@ -549,7 +545,7 @@ impl Shell {
             cmd.env(&k, &v);
         }
         for assign in assigns {
-            let value = self.expand_string(&assign.value);
+            let value = self.expand_string(&assign.value)?;
             cmd.env(&assign.name, &value);
         }
 

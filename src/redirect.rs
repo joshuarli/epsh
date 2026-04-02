@@ -37,7 +37,7 @@ impl Shell {
 
             match &redir.kind {
                 RedirKind::Input(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::File::open(&filename).map_err(|e| {
                         eprintln!("{filename}: {e}");
                         ShellError::Io(e)
@@ -47,7 +47,7 @@ impl Shell {
                     }
                 }
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::File::create(&filename).map_err(|e| {
                         eprintln!("{filename}: {e}");
                         ShellError::Io(e)
@@ -57,7 +57,7 @@ impl Shell {
                     }
                 }
                 RedirKind::Append(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::OpenOptions::new()
                         .create(true)
                         .truncate(false)
@@ -72,7 +72,7 @@ impl Shell {
                     }
                 }
                 RedirKind::ReadWrite(word) => {
-                    let filename = self.expand_string(word);
+                    let filename = self.expand_string(word)?;
                     let file = std::fs::OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -88,7 +88,7 @@ impl Shell {
                     }
                 }
                 RedirKind::DupInput(word) | RedirKind::DupOutput(word) => {
-                    let fd_str = self.expand_string(word);
+                    let fd_str = self.expand_string(word)?;
                     if fd_str == "-" {
                         unsafe {
                             sys::close(target_fd);
@@ -119,7 +119,7 @@ impl Shell {
                             parts: parse_word_parts(body),
                             span: redir.span,
                         };
-                        self.expand_string(&word)
+                        self.expand_string(&word)?
                     } else {
                         body.clone()
                     };
