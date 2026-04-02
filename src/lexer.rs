@@ -142,13 +142,30 @@ impl Lexer {
         self.pushback = Some((tok, span));
     }
 
-    /// Peek at the next character without consuming it.
-    fn peek(&self) -> Option<char> {
+    /// Peek at the next character without consuming it (raw, no backslash-newline eating).
+    fn peek_raw(&self) -> Option<char> {
         self.src.get(self.pos).copied()
     }
 
-    /// Consume and return the next character, updating position tracking.
-    fn advance(&mut self) -> Option<char> {
+    /// Peek at the next character, transparently consuming any `\<newline>` sequences.
+    /// Mirrors dash's `pgetc_eatbnl()` — used in most contexts except single quotes
+    /// and heredoc body reading.
+    fn peek(&mut self) -> Option<char> {
+        loop {
+            let ch = self.src.get(self.pos).copied()?;
+            if ch == '\\' && self.src.get(self.pos + 1).copied() == Some('\n') {
+                // Consume the backslash-newline continuation
+                self.pos += 2;
+                self.line += 1;
+                self.col = 1;
+                continue;
+            }
+            return Some(ch);
+        }
+    }
+
+    /// Consume and return the next character, updating position tracking (raw).
+    fn advance_raw(&mut self) -> Option<char> {
         let ch = self.src.get(self.pos).copied()?;
         self.pos += 1;
         if ch == '\n' {
@@ -160,18 +177,39 @@ impl Lexer {
         Some(ch)
     }
 
+    /// Consume and return the next character, eating `\<newline>` continuations.
+    fn advance(&mut self) -> Option<char> {
+        loop {
+            let ch = self.src.get(self.pos).copied()?;
+            if ch == '\\' && self.src.get(self.pos + 1).copied() == Some('\n') {
+                self.pos += 2;
+                self.line += 1;
+                self.col = 1;
+                continue;
+            }
+            self.pos += 1;
+            if ch == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+            return Some(ch);
+        }
+    }
+
     /// Skip whitespace (spaces and tabs, NOT newlines — those are tokens).
     fn skip_blanks(&mut self) {
         while let Some(ch) = self.peek() {
             if ch == ' ' || ch == '\t' {
                 self.advance();
             } else if ch == '#' {
-                // Comments run to end of line
-                while let Some(c) = self.peek() {
+                // Comments run to end of line (use raw — \<newline> doesn't continue comments)
+                while let Some(c) = self.peek_raw() {
                     if c == '\n' {
                         break;
                     }
-                    self.advance();
+                    self.advance_raw();
                 }
             } else {
                 break;
@@ -326,14 +364,9 @@ impl Lexer {
                         break;
                     }
 
-                    // Backslash escape
+                    // Backslash escape (continuation already eaten by peek/advance)
                     '\\' => {
                         self.advance();
-                        // Line continuation: backslash-newline is consumed entirely
-                        if self.peek() == Some('\n') {
-                            self.advance();
-                            continue;
-                        }
                         word.push('\\');
                         if let Some(escaped) = self.advance() {
                             word.push(escaped);
@@ -341,11 +374,12 @@ impl Lexer {
                     }
 
                     // Single quotes — pass through as-is (parser interprets)
+                    // Use advance_raw: \<newline> is literal inside single quotes
                     '\'' => {
                         word.push('\'');
-                        self.advance();
+                        self.advance_raw();
                         loop {
-                            match self.advance() {
+                            match self.advance_raw() {
                                 None => {
                                     return Err(ShellError::Syntax {
                                         msg: "unterminated single quote".into(),
@@ -382,15 +416,6 @@ impl Lexer {
                     '$' => {
                         word.push('$');
                         self.advance();
-                        // Consume backslash-newline between $ and what follows
-                        while self.peek() == Some('\\') {
-                            if self.src.get(self.pos + 1).copied() == Some('\n') {
-                                self.advance();
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
                         self.read_dollar(&mut word, span)?;
                     }
 
@@ -733,21 +758,22 @@ impl Lexer {
     ) -> std::result::Result<String, ShellError> {
         let mut body = String::new();
         loop {
-            // Read a line
+            // Read a line (raw — no backslash-newline eating in heredoc bodies)
             let mut line = String::new();
 
             // Strip leading tabs if <<-
             if heredoc.strip_tabs {
-                while self.peek() == Some('\t') {
-                    self.advance();
+                while self.peek_raw() == Some('\t') {
+                    self.advance_raw();
                 }
             }
             loop {
-                match self.advance() {
+                match self.advance_raw() {
                     None => {
-                        // EOF before delimiter — the collected body is
-                        // what we have (POSIX says this is an error, but
-                        // many shells tolerate it)
+                        // EOF before newline — check if this line IS the delimiter
+                        if line == heredoc.delimiter {
+                            return Ok(body);
+                        }
                         if !line.is_empty() {
                             body.push_str(&line);
                         }

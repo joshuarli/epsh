@@ -28,6 +28,8 @@ pub struct Shell {
     /// True when evaluating a condition (if test, while cond, && / || operands).
     /// Suppresses set -e (errexit). Mirrors dash's EV_TESTED flag.
     tested: bool,
+    /// Set by expansion when a fatal error occurs (bad substitution, etc.)
+    pub expand_error: bool,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +65,7 @@ impl Shell {
             opts: ShellOpts::default(),
             traps: HashMap::new(),
             tested: false,
+            expand_error: false,
         }
     }
 
@@ -777,7 +780,11 @@ impl Shell {
             }
 
             if pid == 0 {
-                // Child
+                // Child — clear parent's traps, they don't inherit
+                let parent_exit_trap = self.traps.remove("EXIT")
+                    .or_else(|| self.traps.remove("exit"));
+                drop(parent_exit_trap); // parent EXIT trap doesn't run in subshell
+
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
                     Err(_) => sys::exit_child(1),
@@ -787,6 +794,8 @@ impl Shell {
                     Err(ShellError::Exit(n)) => n,
                     Err(_) => 1,
                 };
+                // Run subshell's own EXIT trap if it set one
+                self.run_exit_trap();
                 sys::exit_child(status);
             }
 
