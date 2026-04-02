@@ -28,6 +28,9 @@ pub struct Shell {
     /// True when evaluating a condition (if test, while cond, && / || operands).
     /// Suppresses set -e (errexit). Mirrors dash's EV_TESTED flag.
     pub(crate) tested: bool,
+    /// True when executing inside a forked child (pipeline stage, command subst).
+    /// Subshells skip the extra fork to avoid pipe fd leaks.
+    pub(crate) in_forked_child: bool,
 }
 
 #[derive(Debug, Default)]
@@ -57,6 +60,7 @@ impl Shell {
             opts: ShellOpts::default(),
             traps: HashMap::new(),
             tested: false,
+            in_forked_child: false,
         }
     }
 
@@ -261,8 +265,17 @@ impl Shell {
                 redirs,
                 span: _,
             } => {
-                // Fork a child process for the subshell
-                self.eval_in_subshell(body, redirs)
+                if self.in_forked_child {
+                    // Already in a forked child (pipeline stage, command subst) —
+                    // execute directly without double-forking. Mirrors dash's
+                    // EV_EXIT optimization. Prevents pipe fd leaks.
+                    let saved = self.setup_redirections(redirs)?;
+                    let result = self.eval_command(body);
+                    self.restore_redirections(saved);
+                    result
+                } else {
+                    self.eval_in_subshell(body, redirs)
+                }
             }
 
             Command::BraceGroup {
@@ -600,7 +613,8 @@ impl Shell {
                 }
 
                 if pid == 0 {
-                    // Child process
+                    // Child process — mark as forked so subshells don't double-fork
+                    self.in_forked_child = true;
                     // Connect stdin from previous pipe
                     if i > 0 {
                         sys::dup2(pipes[i - 1].0, 0);
@@ -664,6 +678,7 @@ impl Shell {
                 let parent_exit_trap = self.traps.remove("EXIT")
                     .or_else(|| self.traps.remove("exit"));
                 drop(parent_exit_trap); // parent EXIT trap doesn't run in subshell
+                self.in_forked_child = true;
 
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
@@ -729,6 +744,7 @@ impl Shell {
 
             if pid == 0 {
                 // Child: redirect stdout to write end of pipe
+                self.in_forked_child = true;
                 sys::close(fds[0]);
                 sys::dup2(fds[1], 1);
                 sys::close(fds[1]);

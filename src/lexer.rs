@@ -371,6 +371,18 @@ impl Lexer {
             return Ok((Token::Assignment { name, value: value_parts }, span));
         }
 
+        // IO_NUMBER detection: if word is 1-2 digits, no quoting, and next char
+        // is < or >, treat as a redirect fd number (not a word). Push the word
+        // text back as context for the redirect token that follows.
+        if !had_quoting
+            && let Some(text) = single_literal_text(&parts)
+            && text.len() <= 2
+            && text.chars().all(|c| c.is_ascii_digit())
+            && matches!(self.peek_raw(), Some('<' | '>'))
+        {
+            return Ok((Token::Word(parts, had_quoting), span));
+        }
+
         Ok((Token::Word(parts, had_quoting), span))
     }
 

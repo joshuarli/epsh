@@ -325,10 +325,47 @@ impl Parser {
         loop {
             let (tok, tok_span) = self.peek()?;
             match &tok {
-                Token::Word(parts, _) => {
-                    self.next()?;
-
+                Token::Word(parts, had_q) => {
                     let text = parts_to_text(parts);
+
+                    // IO_NUMBER: digit-only unquoted word before redirect operator
+                    if !had_q
+                        && text.len() <= 2
+                        && text.chars().all(|c| c.is_ascii_digit())
+                    {
+                        // Peek at what follows — if it's a redirect, use as fd number
+                        self.next()?; // consume the digit word
+                        let (next_tok, next_span) = self.peek()?;
+                        if next_tok.is_redir() {
+                            let fd: i32 = text.parse().unwrap_or(-1);
+                            self.next()?; // consume redirect op
+                            let mut redir = self.parse_redir_after_op(&next_tok, next_span)?;
+                            redir.fd = fd;
+                            redirs.push(redir);
+                            continue;
+                        }
+                        // Not a redirect — treat as normal word
+                        // (already consumed, push as argument)
+                        // Check for function definition: name() { ... }
+                        if args.is_empty() && assigns.is_empty() {
+                            let (next, _next_span) = self.peek()?;
+                            if next == Token::LParen {
+                                self.next()?;
+                                self.expect(&Token::RParen)?;
+                                self.skip_newlines()?;
+                                let body = self.parse_command()?;
+                                return Ok(Command::FuncDef {
+                                    name: text,
+                                    body: Box::new(body),
+                                    span: tok_span,
+                                });
+                            }
+                        }
+                        args.push(Word { parts: parts.clone(), span: tok_span });
+                        continue;
+                    }
+
+                    self.next()?;
 
                     // Check for function definition: name() { ... }
                     if args.is_empty() && assigns.is_empty() {
@@ -879,6 +916,27 @@ impl Parser {
             if tok.is_redir() {
                 self.next()?;
                 redirs.push(self.parse_redir_after_op(&tok, span)?);
+            } else if let Token::Word(parts, false) = &tok {
+                // IO_NUMBER: digit word before redirect
+                let text = parts_to_text(parts);
+                if text.len() <= 2 && text.chars().all(|c| c.is_ascii_digit()) {
+                    // Check if next-next token is a redirect
+                    self.next()?; // consume digit
+                    let (next, next_span) = self.peek()?;
+                    if next.is_redir() {
+                        let fd: i32 = text.parse().unwrap_or(-1);
+                        self.next()?;
+                        let mut redir = self.parse_redir_after_op(&next, next_span)?;
+                        redir.fd = fd;
+                        redirs.push(redir);
+                    } else {
+                        // Not a redirect — push back the digit word
+                        self.lexer.push_back(Token::Word(parts.clone(), false), span);
+                        break;
+                    }
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
