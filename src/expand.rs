@@ -375,14 +375,15 @@ fn expand_param_to_fragments(
             if is_unset {
                 Ok(vec![])
             } else {
-                expand_word_parts(
+                let frags = expand_word_parts(
                     word,
                     vars,
                     exit_status,
                     shell_pid,
                     quoted_context,
                     cmd_subst,
-                )
+                )?;
+                Ok(frags)
             }
         }
         _ => {
