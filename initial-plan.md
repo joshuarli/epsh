@@ -2,7 +2,11 @@
 
 ## Context
 
-Build a non-interactive, embeddable POSIX shell in stdlib-only Rust, targeting use as a script executor for coding agents. The dash shell (`~/d/dash-0.5.11+git20200708+dd9ef66`) serves as the reference implementation. We port its semantics faithfully but leverage Rust's type system and memory safety for cleaner, more maintainable code.
+Build a non-interactive, embeddable POSIX shell in stdlib-only Rust, targeting use as a script executor for coding agents. Two reference implementations studied:
+- **dash** (`~/d/dash-0.5.11+git20200708+dd9ef66`) — minimal, fast, well-tested POSIX shell (~12k LOC). Classic C design with union-tagged AST, setjmp/longjmp errors, embedded control chars in words, hand-rolled hash tables.
+- **posh** (`~/d/posh-0.14.3`) — portable POSIX shell (~17k LOC, pdksh lineage). Notable for arena allocation, environment stacking with per-scope jbufs, SubType stack for nested expansion, explicit field-splitting state machine (IFS_WORD/IFS_WS/IFS_NWS), and migration to tree-based symbol lookup.
+
+We take the best ideas from both and leverage Rust's type system for cleaner, safer code.
 
 ## What We Keep from Dash
 
@@ -133,18 +137,34 @@ struct Var {
 ```
 Local scoping via a `Vec<HashMap<String, Option<Var>>>` scope stack pushed/popped on function calls.
 
-**5. Redirection state** — stack of saved FDs, restored on scope exit:
+**5. Environment stacking** (inspired by posh's `struct env`) — each function call, dot-script, or subshell pushes a new `Scope` that owns its local variables and saved FD state. On exit (normal or error), the scope's `Drop` impl restores FDs and pops variables. This replaces both dash's `struct localvar` chain and posh's `quitenv()` cleanup with Rust's RAII.
 ```rust
-struct RedirState {
-    saved: Vec<(RawFd, Option<RawFd>)>,  // (fd, saved_copy)
+struct Scope {
+    locals: HashMap<String, Option<Var>>,  // saved previous values
+    saved_fds: Vec<(RawFd, Option<RawFd>)>,
 }
 ```
 
-**6. No libc glob** — custom glob implementation in `glob.rs` using `std::fs::read_dir`. Avoids libc dependency and gives us full control.
+**6. Field splitting state machine** (adopted from posh) — track IFS state as an enum rather than dash's multi-pass approach:
+```rust
+enum IfsState { Init, Word, IfsWhitespace, IfsNonWhitespace }
+```
+This handles edge cases correctly in a single pass: empty fields between non-WS IFS chars, leading/trailing WS IFS stripping, and no splitting inside quotes.
 
-**7. Arithmetic evaluator** — recursive-descent parser for C-like integer arithmetic in `arith.rs`, replacing dash's yacc-generated `arith_yacc.c`.
+**7. No libc glob** — custom glob implementation in `glob.rs` using `std::fs::read_dir`. Avoids libc dependency and gives us full control.
 
-**8. Fork/exec** — use `std::process::Command` where possible, fall back to raw `libc::fork`/`libc::execve` via `std::os::unix` for pipelines and complex FD routing. Actually — since we're stdlib-only and need precise FD control for pipelines/redirections, we'll use `unsafe` blocks with the unix-specific stdlib APIs (`std::os::unix::process::CommandExt` for `pre_exec`, plus `std::os::unix::io`).
+**8. Arithmetic evaluator** — recursive-descent parser for C-like integer arithmetic in `arith.rs`, replacing dash's yacc-generated `arith_yacc.c`.
+
+**9. Fork/exec** — use `std::process::Command` with `CommandExt::pre_exec` for simple commands. For pipelines needing precise FD routing, use `unsafe` with `std::os::unix` APIs. No direct libc dependency.
+
+**10. Nested expansion via SubType stack** (adopted from posh) — when expanding `${x:-${y}}`, push a `SubType` frame tracking the outer expansion's state. This handles arbitrary nesting depth cleanly:
+```rust
+struct SubType {
+    kind: ParamOp,        // Minus, Plus, Question, Assign, Trim*, Length
+    base: Option<String>, // accumulated value before nested expansion
+    quoted: bool,
+}
+```
 
 ### Execution Flow
 
