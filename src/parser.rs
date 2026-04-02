@@ -902,14 +902,18 @@ impl Parser {
 /// Parse a raw word string into WordPart nodes.
 /// Handles quoting, parameter expansion syntax, command substitution markers, etc.
 pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
+    parse_word_parts_ctx(raw, false)
+}
+
+fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
     let mut parts = Vec::new();
     let chars: Vec<char> = raw.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         match chars[i] {
-            '\'' => {
-                // Single-quoted string
+            '\'' if !in_dquote => {
+                // Single-quoted string (only in unquoted context)
                 i += 1; // skip opening '
                 let start = i;
                 while i < chars.len() && chars[i] != '\'' {
@@ -980,7 +984,8 @@ pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
                 // Accumulate literal text
                 let start = i;
                 while i < chars.len()
-                    && !matches!(chars[i], '\'' | '"' | '$' | '`' | '\\')
+                    && !matches!(chars[i], '"' | '$' | '`' | '\\')
+                    && (in_dquote || chars[i] != '\'')
                     && !(chars[i] == '~' && i == 0)
                 {
                     i += 1;
@@ -1290,23 +1295,25 @@ fn parse_brace_param(chars: &[char], i: &mut usize, in_dquote: bool) -> WordPart
             let word = read_brace_word(chars, i, in_dquote);
             ParamOp::Alternative { colon: false, word }
         }
+        // Trim ops: ALWAYS use BASESYNTAX (single quotes are quoting)
+        // This matches dash's parsesub() which forces newsyn=BASESYNTAX for % and #
         '%' => {
             if *i < chars.len() && chars[*i] == '%' {
                 *i += 1;
-                let word = read_brace_word(chars, i, in_dquote);
+                let word = read_brace_word(chars, i, false);
                 ParamOp::TrimSuffixLarge(word)
             } else {
-                let word = read_brace_word(chars, i, in_dquote);
+                let word = read_brace_word(chars, i, false);
                 ParamOp::TrimSuffixSmall(word)
             }
         }
         '#' => {
             if *i < chars.len() && chars[*i] == '#' {
                 *i += 1;
-                let word = read_brace_word(chars, i, in_dquote);
+                let word = read_brace_word(chars, i, false);
                 ParamOp::TrimPrefixLarge(word)
             } else {
-                let word = read_brace_word(chars, i, in_dquote);
+                let word = read_brace_word(chars, i, false);
                 ParamOp::TrimPrefixSmall(word)
             }
         }
@@ -1379,7 +1386,7 @@ fn read_brace_word(chars: &[char], i: &mut usize, in_dquote: bool) -> Vec<WordPa
         }
     }
 
-    parse_word_parts(&raw)
+    parse_word_parts_ctx(&raw, in_dquote)
 }
 
 /// Coalesce adjacent Literal parts.

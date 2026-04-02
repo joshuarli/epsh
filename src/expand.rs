@@ -186,8 +186,8 @@ fn expand_word_parts(
                 // $* in quoted context: join with first char of IFS
                 else if param.name == "*" && matches!(param.op, ParamOp::Normal) && quoted_context
                 {
-                    let sep = vars.ifs().chars().next().unwrap_or(' ');
-                    let value = vars.positional.join(&sep.to_string());
+                    let sep = vars.ifs().chars().next().map_or(String::new(), |c| c.to_string());
+                    let value = vars.positional.join(&sep);
                     result.push(ExpandedWord {
                         value,
                         split_fields: false,
