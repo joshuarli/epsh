@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::error::{ShellError, Span};
-use crate::lexer::{Lexer, PendingHereDoc, Token};
+use crate::lexer::{Lexer, PendingHereDoc, Token, parts_have_quoting, parts_to_text};
 
 /// Recursive-descent parser for POSIX shell grammar.
 ///
@@ -128,8 +128,6 @@ impl Parser {
             _ => {}
         }
     }
-
-    // ── Grammar productions ──────────────────────────────────────────
 
     /// program = linebreak complete_commands linebreak EOF
     fn parse_program(&mut self) -> Result<Vec<Command>, ShellError> {
@@ -315,7 +313,7 @@ impl Parser {
                     self.next()?;
                     assigns.push(Assignment {
                         name: name.clone(),
-                        value: self.raw_word_to_ast(&value, tok_span),
+                        value: Word { parts: value.clone(), span: tok_span },
                         span: tok_span,
                     });
                 }
@@ -327,8 +325,10 @@ impl Parser {
         loop {
             let (tok, tok_span) = self.peek()?;
             match &tok {
-                Token::Word(w) => {
+                Token::Word(parts, _) => {
                     self.next()?;
+
+                    let text = parts_to_text(parts);
 
                     // Check for function definition: name() { ... }
                     if args.is_empty() && assigns.is_empty() {
@@ -339,21 +339,22 @@ impl Parser {
                             self.skip_newlines()?;
                             let body = self.parse_command()?;
                             return Ok(Command::FuncDef {
-                                name: w.clone(),
+                                name: text,
                                 body: Box::new(body),
                                 span: tok_span,
                             });
                         }
                     }
 
-                    args.push(self.raw_word_to_ast(w, tok_span));
+                    args.push(Word { parts: parts.clone(), span: tok_span });
                 }
                 // After command name, assignment tokens are treated as regular args
                 // (e.g., `local X=value`, `export FOO=bar`)
                 Token::Assignment { name, value } if !args.is_empty() => {
                     self.next()?;
-                    let text = format!("{name}={value}");
-                    args.push(self.raw_word_to_ast(&text, tok_span));
+                    let mut parts = vec![WordPart::Literal(format!("{}=", name))];
+                    parts.extend(value.clone());
+                    args.push(Word { parts, span: tok_span });
                 }
                 // Reserved words used as arguments (after command name)
                 tok if args.is_empty() && !tok.is_redir() => break,
@@ -423,8 +424,8 @@ impl Parser {
                 self.lexer.recognize_reserved = false;
                 let (delim_tok, delim_span) = self.next()?;
                 self.lexer.recognize_reserved = true;
-                let delim_raw = match delim_tok {
-                    Token::Word(w) => w,
+                let (delim_parts, had_quoting) = match delim_tok {
+                    Token::Word(parts, q) => (parts, q),
                     other => {
                         return Err(ShellError::Syntax {
                             msg: format!("expected here-doc delimiter, got {other:?}"),
@@ -433,10 +434,9 @@ impl Parser {
                     }
                 };
 
-                // Determine if the delimiter is quoted (any quoting means no expansion)
-                let quoted =
-                    delim_raw.contains('\'') || delim_raw.contains('"') || delim_raw.contains('\\');
-                let delimiter = strip_quotes(&delim_raw);
+                // Delimiter is quoted if any quoting was present in source
+                let quoted = had_quoting || parts_have_quoting(&delim_parts);
+                let delimiter = parts_to_text(&delim_parts);
 
                 self.lexer.pending_heredocs.push(PendingHereDoc {
                     delimiter,
@@ -468,7 +468,7 @@ impl Parser {
                 let (word_tok, word_span) = self.next()?;
                 self.lexer.recognize_reserved = true;
                 let word = match word_tok {
-                    Token::Word(w) => self.raw_word_to_ast(&w, word_span),
+                    Token::Word(parts, _) => Word { parts, span: word_span },
                     // Accept reserved words as filenames
                     ref tok => {
                         let text = reserved_word_text(tok);
@@ -500,8 +500,6 @@ impl Parser {
             }
         }
     }
-
-    // ── Compound commands ────────────────────────────────────────────
 
     /// subshell = '(' compound_list ')'
     fn parse_subshell(&mut self) -> Result<Command, ShellError> {
@@ -549,7 +547,6 @@ impl Parser {
         let (tok, _) = self.peek()?;
         let else_part = match tok {
             Token::Elif => {
-                // elif is syntactic sugar for else if ... fi
                 Some(Box::new(self.parse_elif()?))
             }
             Token::Else => {
@@ -696,7 +693,7 @@ impl Parser {
         let (name_tok, name_span) = self.next()?;
         self.lexer.recognize_reserved = true;
         let var = match name_tok {
-            Token::Word(w) => w,
+            Token::Word(parts, _) => parts_to_text(&parts),
             other => {
                 return Err(ShellError::Syntax {
                     msg: format!("expected variable name after 'for', got {other:?}"),
@@ -715,9 +712,9 @@ impl Parser {
             loop {
                 let (tok, tok_span) = self.peek()?;
                 match tok {
-                    Token::Word(w) => {
+                    Token::Word(parts, _) => {
                         self.next()?;
-                        words.push(self.raw_word_to_ast(&w, tok_span));
+                        words.push(Word { parts: parts.clone(), span: tok_span });
                     }
                     Token::Semi | Token::Newline => {
                         self.next()?;
@@ -770,7 +767,7 @@ impl Parser {
         let (word_tok, word_span) = self.next()?;
         self.lexer.recognize_reserved = true;
         let word = match word_tok {
-            Token::Word(w) => self.raw_word_to_ast(&w, word_span),
+            Token::Word(parts, _) => Word { parts, span: word_span },
             other => {
                 return Err(ShellError::Syntax {
                     msg: format!("expected word after 'case', got {other:?}"),
@@ -823,7 +820,7 @@ impl Parser {
             let (tok, tok_span) = self.next()?;
             self.lexer.recognize_reserved = true;
             let pat = match tok {
-                Token::Word(w) => self.raw_word_to_ast(&w, tok_span),
+                Token::Word(parts, _) => Word { parts, span: tok_span },
                 ref other => {
                     let text = reserved_word_text(other);
                     if text.is_empty() {
@@ -888,19 +885,10 @@ impl Parser {
         }
         Ok(redirs)
     }
-
-    // ── Word parsing ─────────────────────────────────────────────────
-
-    /// Convert a raw word string (from the lexer) into a structured Word AST.
-    /// The lexer preserves quotes and `$` markers; we parse them into WordParts here.
-    fn raw_word_to_ast(&self, raw: &str, span: Span) -> Word {
-        let parts = parse_word_parts(raw);
-        Word { parts, span }
-    }
 }
 
 /// Parse a raw word string into WordPart nodes.
-/// Handles quoting, parameter expansion syntax, command substitution markers, etc.
+/// Kept for heredoc body expansion (called from redirect.rs).
 pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
     parse_word_parts_ctx(raw, false)
 }
@@ -998,11 +986,9 @@ fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
         }
     }
 
-    // Coalesce adjacent literals
     coalesce_literals(parts)
 }
 
-/// Parse parts inside double quotes.
 fn parse_double_quoted_parts(chars: &[char], i: &mut usize) -> Vec<WordPart> {
     let mut parts = Vec::new();
     let mut literal = String::new();
@@ -1069,7 +1055,6 @@ fn parse_double_quoted_parts(chars: &[char], i: &mut usize) -> Vec<WordPart> {
     parts
 }
 
-/// Parse `$...` expansion after the `$` has been consumed.
 fn parse_dollar(chars: &[char], i: &mut usize, in_dquote: bool) -> Option<WordPart> {
     if *i >= chars.len() {
         return None;
@@ -1077,14 +1062,14 @@ fn parse_dollar(chars: &[char], i: &mut usize, in_dquote: bool) -> Option<WordPa
 
     match chars[*i] {
         '{' => {
-            *i += 1; // skip {
+            *i += 1;
             Some(parse_brace_param(chars, i, in_dquote))
         }
         '(' => {
-            *i += 1; // skip first (
+            *i += 1;
             if *i < chars.len() && chars[*i] == '(' {
                 // $(( — arithmetic
-                *i += 1; // skip second (
+                *i += 1;
                 let mut content = Vec::new();
                 let mut depth = 1u32;
                 while *i < chars.len() {
@@ -1149,7 +1134,6 @@ fn parse_dollar(chars: &[char], i: &mut usize, in_dquote: bool) -> Option<WordPa
                         }
                     }
                 }
-                // Recursively parse the command substitution content
                 let cmd = parse_cmdsubst_content(&content);
                 Some(WordPart::CmdSubst(Box::new(cmd)))
             }
@@ -1189,7 +1173,6 @@ fn parse_dollar(chars: &[char], i: &mut usize, in_dquote: bool) -> Option<WordPa
     }
 }
 
-/// Parse `${...}` parameter expansion.
 fn parse_brace_param(chars: &[char], i: &mut usize, in_dquote: bool) -> WordPart {
     if *i >= chars.len() {
         return WordPart::Literal("${".into());
@@ -1409,7 +1392,6 @@ fn parse_cmdsubst_content(content: &str) -> Command {
     match Parser::new(content).parse() {
         Ok(program) => {
             if program.commands.is_empty() {
-                // Empty command substitution
                 Command::Simple {
                     assigns: Vec::new(),
                     args: Vec::new(),
@@ -1419,7 +1401,6 @@ fn parse_cmdsubst_content(content: &str) -> Command {
             } else if program.commands.len() == 1 {
                 program.commands.into_iter().next().unwrap()
             } else {
-                // Multiple commands: chain with Sequence
                 let mut iter = program.commands.into_iter();
                 let mut result = iter.next().unwrap();
                 for cmd in iter {
@@ -1428,15 +1409,12 @@ fn parse_cmdsubst_content(content: &str) -> Command {
                 result
             }
         }
-        Err(_) => {
-            // Parse error in command substitution — return empty command
-            Command::Simple {
-                assigns: Vec::new(),
-                args: Vec::new(),
-                redirs: Vec::new(),
-                span: Span::default(),
-            }
-        }
+        Err(_) => Command::Simple {
+            assigns: Vec::new(),
+            args: Vec::new(),
+            redirs: Vec::new(),
+            span: Span::default(),
+        },
     }
 }
 
@@ -1444,7 +1422,7 @@ fn parse_cmdsubst_content(content: &str) -> Command {
 fn is_command_start(tok: &Token) -> bool {
     matches!(
         tok,
-        Token::Word(_)
+        Token::Word(_, _)
             | Token::Assignment { .. }
             | Token::If
             | Token::While
@@ -1480,51 +1458,6 @@ fn reserved_word_text(tok: &Token) -> &'static str {
     }
 }
 
-/// Strip all quoting from a string (for here-doc delimiters).
-fn strip_quotes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                i += 1;
-                while i < chars.len() && chars[i] != '\'' {
-                    result.push(chars[i]);
-                    i += 1;
-                }
-                if i < chars.len() {
-                    i += 1;
-                }
-            }
-            '"' => {
-                i += 1;
-                while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < chars.len() {
-                        i += 1;
-                    }
-                    result.push(chars[i]);
-                    i += 1;
-                }
-                if i < chars.len() {
-                    i += 1;
-                }
-            }
-            '\\' => {
-                i += 1;
-                if i < chars.len() {
-                    result.push(chars[i]);
-                    i += 1;
-                }
-            }
-            c => {
-                result.push(c);
-                i += 1;
-            }
-        }
-    }
-    result
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,19 +1,20 @@
+use crate::ast::{Command, ParamExpr, ParamOp, WordPart};
 use crate::error::{ShellError, Span};
 
 /// Token types produced by the lexer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Token {
     /// A word (command name, argument, filename, etc.)
-    /// Contains the raw text; quoting/expansion is resolved later by the parser
-    /// when building WordPart nodes.
-    Word(String),
+    /// Contains pre-parsed WordPart nodes — no re-parsing needed.
+    /// `had_quoting` is true if any quoting (', ", \) was present in the source.
+    Word(Vec<WordPart>, bool),
 
     /// An assignment word: `name=value` at the start of a simple command.
     /// The lexer recognizes these so the parser can distinguish assignments
     /// from ordinary arguments.
     Assignment {
         name: String,
-        value: String,
+        value: Vec<WordPart>,
     },
 
     /// Operators
@@ -58,6 +59,14 @@ pub enum Token {
     Eof,
 }
 
+impl PartialEq for Token {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Eq for Token {}
+
 impl Token {
     /// Check if this is a redirection operator.
     pub fn is_redir(&self) -> bool {
@@ -92,11 +101,7 @@ pub struct PendingHereDoc {
 /// - Quoting (single quotes, double quotes, backslash)
 /// - Here-document delimiter collection
 /// - Comment stripping
-///
-/// Does NOT handle:
-/// - Word expansion (that's the parser + expander's job)
-/// - Here-document body reading (parser calls `read_heredoc_body` after
-///   seeing a complete command with heredoc redirections)
+/// - Single-pass word tokenization into Vec<WordPart>
 pub struct Lexer {
     src: Vec<char>,
     pos: usize,
@@ -341,133 +346,775 @@ impl Lexer {
         Ok(Some((tok, span)))
     }
 
-    /// Read a word token. Handles quoting (single, double, backslash),
-    /// and IO_NUMBER detection (digits before < or >).
+    /// Read a word token. Produces Vec<WordPart> directly (single-pass).
     fn read_word(&mut self, span: Span) -> std::result::Result<(Token, Span), ShellError> {
-        let mut word = String::new();
+        let (parts, had_quoting) = self.read_word_parts(false, span)?;
 
-        loop {
-            match self.peek() {
-                None => break,
-                Some(ch) => match ch {
-                    // Word delimiters
-                    ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' => break,
-
-                    // Redirection operators end a word, BUT if the word so far
-                    // is all digits, it's an IO_NUMBER — include it as part
-                    // of the word so the parser can extract the fd number.
-                    '<' | '>' => {
-                        // If we haven't accumulated anything yet, this is an
-                        // operator, not a word — but try_operator already
-                        // handled that case. If we reach here, we have word
-                        // content and hit a redirect.
-                        break;
-                    }
-
-                    // Backslash escape (continuation already eaten by peek/advance)
-                    '\\' => {
-                        self.advance();
-                        word.push('\\');
-                        if let Some(escaped) = self.advance() {
-                            word.push(escaped);
-                        }
-                    }
-
-                    // Single quotes — pass through as-is (parser interprets)
-                    // Use advance_raw: \<newline> is literal inside single quotes
-                    '\'' => {
-                        word.push('\'');
-                        self.advance_raw();
-                        loop {
-                            match self.advance_raw() {
-                                None => {
-                                    return Err(ShellError::Syntax {
-                                        msg: "unterminated single quote".into(),
-                                        span,
-                                    });
-                                }
-                                Some('\'') => {
-                                    word.push('\'');
-                                    break;
-                                }
-                                Some(c) => word.push(c),
-                            }
-                        }
-                    }
-
-                    // Double quotes — pass through (parser handles expansions)
-                    '"' => {
-                        word.push('"');
-                        self.advance();
-                        self.read_double_quoted(&mut word, span)?;
-                        word.push('"');
-                    }
-
-                    // Backtick — pass through for parser
-                    '`' => {
-                        word.push('`');
-                        self.advance();
-                        self.read_backtick(&mut word, span)?;
-                        word.push('`');
-                    }
-
-                    // Dollar — could be $var, ${...}, $(...), $((...))
-                    // Pass through raw for parser to interpret
-                    '$' => {
-                        word.push('$');
-                        self.advance();
-                        self.read_dollar(&mut word, span)?;
-                    }
-
-                    // Comment (only valid at word boundary, but if we're
-                    // mid-word we shouldn't see this — skip_blanks handles it)
-                    '#' if word.is_empty() => break,
-
-                    // Regular character
-                    _ => {
-                        word.push(ch);
-                        self.advance();
-                    }
-                },
-            }
-        }
-
-        if word.is_empty() {
-            // Shouldn't happen: we checked for operators and EOF already
+        if parts.is_empty() {
             return Err(ShellError::Syntax {
                 msg: "unexpected character".into(),
                 span,
             });
         }
 
-        // Check for reserved words
+        // Check for reserved words: single Literal that matches a reserved word
         if self.recognize_reserved
-            && let Some(tok) = Self::reserved_word(&word)
+            && let Some(text) = single_literal_text(&parts)
+            && let Some(tok) = Self::reserved_word(text)
         {
             return Ok((tok, span));
         }
 
-        // Check for assignment words: name=value where name is a valid
-        // variable name (starts with letter/underscore, contains alnum/underscore)
-        if let Some(eq_pos) = word.find('=') {
-            let name = &word[..eq_pos];
-            if !name.is_empty() && is_name(name) {
-                return Ok((
-                    Token::Assignment {
-                        name: name.to_string(),
-                        value: word[eq_pos + 1..].to_string(),
-                    },
-                    span,
-                ));
+        // Check for assignment words: name=value
+        // The parts start with a Literal containing "name=..." — split it
+        if let Some((name, value_parts)) = try_split_assignment(&parts) {
+            return Ok((Token::Assignment { name, value: value_parts }, span));
+        }
+
+        Ok((Token::Word(parts, had_quoting), span))
+    }
+
+    /// Main recursive word-part builder. Reads characters and produces WordPart nodes.
+    /// `in_dquote`: whether we're inside double quotes (affects quoting rules).
+    /// Stops at word delimiters in unquoted context.
+    /// Returns (parts, had_quoting) — had_quoting is true if any quoting was encountered
+    /// (single quotes, double quotes, backslash escapes).
+    fn read_word_parts(
+        &mut self,
+        in_dquote: bool,
+        span: Span,
+    ) -> std::result::Result<(Vec<WordPart>, bool), ShellError> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let at_start = true;
+        let mut had_quoting = in_dquote; // if already in dquote, quoting occurred
+
+        loop {
+            let ch = if in_dquote {
+                // Inside double quotes, we use advance() which eats \<newline>
+                self.peek()
+            } else {
+                self.peek()
+            };
+
+            match ch {
+                None => break,
+                Some(ch) => {
+                    if !in_dquote {
+                        // Word delimiters in unquoted context
+                        match ch {
+                            ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>' => break,
+                            '#' if parts.is_empty() && literal.is_empty() => break,
+                            _ => {}
+                        }
+                    }
+
+                    match ch {
+                        '"' if !in_dquote => {
+                            // Double quote: collect inner parts
+                            if !literal.is_empty() {
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                            }
+                            self.advance(); // consume opening "
+                            let inner = self.read_dquote_parts(span)?;
+                            had_quoting = true;                            parts.push(WordPart::DoubleQuoted(inner));
+                        }
+                        '"' if in_dquote => {
+                            // Closing double quote — stop collecting
+                            break;
+                        }
+                        '\'' if !in_dquote => {
+                            // Single quote: read until closing '
+                            if !literal.is_empty() {
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                            }
+                            self.advance_raw(); // consume opening '
+                            let mut content = String::new();
+                            loop {
+                                match self.advance_raw() {
+                                    None => {
+                                        return Err(ShellError::Syntax {
+                                            msg: "unterminated single quote".into(),
+                                            span,
+                                        });
+                                    }
+                                    Some('\'') => break,
+                                    Some(c) => content.push(c),
+                                }
+                            }
+                            had_quoting = true;                            parts.push(WordPart::SingleQuoted(content));
+                        }
+                        '\\' if in_dquote => {
+                            had_quoting = true; self.advance(); // consume backslash
+                            if let Some(c) = self.advance() {
+                                // In double quotes, backslash only escapes $, `, ", \, and newline
+                                if matches!(c, '$' | '`' | '"' | '\\' | '\n') {
+                                    if c != '\n' {
+                                        literal.push(c);
+                                    }
+                                } else {
+                                    literal.push('\\');
+                                    literal.push(c);
+                                }
+                            }
+                        }
+                        '\\' => {
+                            // Unquoted backslash
+                            had_quoting = true; self.advance(); // consume backslash
+                            if let Some(escaped) = self.advance() {
+                                literal.push(escaped);
+                            }
+                        }
+                        '$' => {
+                            if !literal.is_empty() {
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                            }
+                            self.advance(); // consume $
+                            if let Some(part) = self.read_dollar(in_dquote, span)? {
+                                parts.push(part);
+                            } else {
+                                // Bare $
+                                literal.push('$');
+                            }
+                        }
+                        '`' => {
+                            if !literal.is_empty() {
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                            }
+                            self.advance(); // consume opening `
+                            let part = self.read_backtick_part(span)?;
+                            parts.push(part);
+                        }
+                        '~' if !in_dquote && parts.is_empty() && literal.is_empty() && at_start => {
+                            // Tilde expansion at word start
+                            self.advance(); // consume ~
+                            let mut user = String::new();
+                            while let Some(c) = self.peek() {
+                                if c == '/' || c == ':' || c.is_whitespace()
+                                    || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
+                                {
+                                    break;
+                                }
+                                user.push(c);
+                                self.advance();
+                            }
+                            parts.push(WordPart::Tilde(user));
+                        }
+                        _ => {
+                            literal.push(ch);
+                            self.advance();
+                        }
+                    }
+                }
             }
         }
 
-        Ok((Token::Word(word), span))
+        if !literal.is_empty() {
+            parts.push(WordPart::Literal(literal));
+        }
+
+        Ok((coalesce_literals(parts), had_quoting))
     }
 
-    /// Read inside double quotes until the closing `"`.
-    /// Handles nested `$()`, `${}`, backticks, and backslash escapes.
-    fn read_double_quoted(
+    /// Read parts inside double quotes until closing `"`.
+    fn read_dquote_parts(
+        &mut self,
+        span: Span,
+    ) -> std::result::Result<Vec<WordPart>, ShellError> {
+        let (parts, _) = self.read_word_parts(true, span)?;
+        // Consume the closing "
+        match self.peek() {
+            Some('"') => {
+                self.advance();
+            }
+            _ => {
+                return Err(ShellError::Syntax {
+                    msg: "unterminated double quote".into(),
+                    span,
+                });
+            }
+        }
+        Ok(parts)
+    }
+
+    /// After consuming `$`, read what follows and produce a WordPart.
+    fn read_dollar(
+        &mut self,
+        in_dquote: bool,
+        span: Span,
+    ) -> std::result::Result<Option<WordPart>, ShellError> {
+        match self.peek() {
+            Some('{') => {
+                self.advance(); // consume {
+                let part = self.read_brace_param(in_dquote, span)?;
+                Ok(Some(part))
+            }
+            Some('(') => {
+                self.advance(); // consume first (
+                if self.peek() == Some('(') {
+                    self.advance(); // consume second (
+                    let part = self.read_arith_expansion(span)?;
+                    Ok(Some(part))
+                } else {
+                    let part = self.read_cmd_subst(span)?;
+                    Ok(Some(part))
+                }
+            }
+            // Special parameters
+            Some(c @ ('@' | '*' | '#' | '?' | '-' | '$' | '!')) => {
+                self.advance();
+                Ok(Some(WordPart::Param(ParamExpr {
+                    name: c.to_string(),
+                    op: ParamOp::Normal,
+                    span: Span::default(),
+                })))
+            }
+            // Positional parameters $0-$9
+            Some(c @ '0'..='9') => {
+                self.advance();
+                Ok(Some(WordPart::Param(ParamExpr {
+                    name: c.to_string(),
+                    op: ParamOp::Normal,
+                    span: Span::default(),
+                })))
+            }
+            // Variable name
+            Some(c) if c == '_' || c.is_ascii_alphabetic() => {
+                let mut name = String::new();
+                name.push(c);
+                self.advance();
+                while let Some(c) = self.peek() {
+                    if c == '_' || c.is_ascii_alphanumeric() {
+                        name.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                Ok(Some(WordPart::Param(ParamExpr {
+                    name,
+                    op: ParamOp::Normal,
+                    span: Span::default(),
+                })))
+            }
+            // Bare $
+            _ => Ok(None),
+        }
+    }
+
+    /// Read `${...}` parameter expansion after `${` has been consumed.
+    fn read_brace_param(
+        &mut self,
+        in_dquote: bool,
+        span: Span,
+    ) -> std::result::Result<WordPart, ShellError> {
+        // ${#var} — length prefix
+        let length = matches!(self.peek(), Some('#'))
+            && self.src.get(self.pos + 1).copied() != Some('}');
+        if length {
+            self.advance(); // consume #
+        }
+
+        // Read variable name
+        let name = self.read_param_name();
+
+        if length {
+            // Skip to closing }
+            self.skip_to_close_brace(span)?;
+            return Ok(WordPart::Param(ParamExpr {
+                name,
+                op: ParamOp::Length,
+                span: Span::default(),
+            }));
+        }
+
+        // Check for operator or closing }
+        match self.peek() {
+            Some('}') => {
+                self.advance();
+                return Ok(WordPart::Param(ParamExpr {
+                    name,
+                    op: ParamOp::Normal,
+                    span: Span::default(),
+                }));
+            }
+            None => {
+                return Err(ShellError::Syntax {
+                    msg: "unterminated ${".into(),
+                    span,
+                });
+            }
+            _ => {}
+        }
+
+        let op_char = self.peek().unwrap();
+
+        // Validate operator character
+        if !matches!(op_char, ':' | '-' | '=' | '?' | '+' | '%' | '#') {
+            // Bad substitution
+            let bad_name = format!("{}{}", name, op_char);
+            self.advance(); // consume bad char
+            self.skip_to_close_brace(span)?;
+            return Ok(WordPart::Param(ParamExpr {
+                name: bad_name,
+                op: ParamOp::BadSubst,
+                span: Span::default(),
+            }));
+        }
+
+        self.advance(); // consume op_char
+
+        let op = match op_char {
+            ':' => {
+                match self.peek() {
+                    Some(op2 @ ('-' | '=' | '?' | '+')) => {
+                        self.advance(); // consume op2
+                        let word = self.read_brace_word_parts(in_dquote, span)?;
+                        match op2 {
+                            '-' => ParamOp::Default { colon: true, word },
+                            '=' => ParamOp::Assign { colon: true, word },
+                            '?' => ParamOp::Error { colon: true, word },
+                            '+' => ParamOp::Alternative { colon: true, word },
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => {
+                        // Just colon with no valid op2 — treat as Normal
+                        self.skip_to_close_brace(span)?;
+                        ParamOp::Normal
+                    }
+                }
+            }
+            '-' => {
+                let word = self.read_brace_word_parts(in_dquote, span)?;
+                ParamOp::Default { colon: false, word }
+            }
+            '=' => {
+                let word = self.read_brace_word_parts(in_dquote, span)?;
+                ParamOp::Assign { colon: false, word }
+            }
+            '?' => {
+                let word = self.read_brace_word_parts(in_dquote, span)?;
+                ParamOp::Error { colon: false, word }
+            }
+            '+' => {
+                let word = self.read_brace_word_parts(in_dquote, span)?;
+                ParamOp::Alternative { colon: false, word }
+            }
+            // Trim ops: ALWAYS use BASESYNTAX (single quotes are quoting)
+            // This matches dash's parsesub() which forces newsyn=BASESYNTAX for % and #
+            '%' => {
+                if self.peek() == Some('%') {
+                    self.advance();
+                    let word = self.read_brace_word_parts(false, span)?;
+                    ParamOp::TrimSuffixLarge(word)
+                } else {
+                    let word = self.read_brace_word_parts(false, span)?;
+                    ParamOp::TrimSuffixSmall(word)
+                }
+            }
+            '#' => {
+                if self.peek() == Some('#') {
+                    self.advance();
+                    let word = self.read_brace_word_parts(false, span)?;
+                    ParamOp::TrimPrefixLarge(word)
+                } else {
+                    let word = self.read_brace_word_parts(false, span)?;
+                    ParamOp::TrimPrefixSmall(word)
+                }
+            }
+            _ => {
+                self.skip_to_close_brace(span)?;
+                ParamOp::Normal
+            }
+        };
+
+        Ok(WordPart::Param(ParamExpr {
+            name,
+            op,
+            span: Span::default(),
+        }))
+    }
+
+    /// Read the variable name portion of a ${...} expansion.
+    fn read_param_name(&mut self) -> String {
+        let mut name = String::new();
+        match self.peek() {
+            // Special params
+            Some(c @ ('@' | '*' | '#' | '?' | '-' | '$' | '!')) => {
+                self.advance();
+                name.push(c);
+            }
+            // Positional
+            Some(c) if c.is_ascii_digit() => {
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        name.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // Regular variable name
+            _ => {
+                while let Some(c) = self.peek() {
+                    if c == '_' || c.is_ascii_alphanumeric() {
+                        name.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        name
+    }
+
+    /// Skip to closing `}` for error recovery in brace params.
+    fn skip_to_close_brace(&mut self, span: Span) -> std::result::Result<(), ShellError> {
+        loop {
+            match self.advance() {
+                Some('}') => return Ok(()),
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated ${".into(),
+                        span,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Read word parts inside `${var<op>...}` until the closing `}`.
+    /// Tracks brace depth for nested `${...}`.
+    /// Read parts inside inner double quotes within `${...}` when already in dquote.
+    /// This is dash's innerdq toggle — content is effectively unquoted until closing ".
+    fn read_brace_dquote_toggle_parts(
+        &mut self,
+        span: Span,
+    ) -> std::result::Result<Vec<WordPart>, ShellError> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated inner double quote in ${}".into(),
+                        span,
+                    });
+                }
+                Some('"') => {
+                    self.advance(); // consume closing inner "
+                    break;
+                }
+                Some('$') => {
+                    self.advance();
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    if let Some(part) = self.read_dollar(false, span)? {
+                        parts.push(part);
+                    } else {
+                        literal.push('$');
+                    }
+                }
+                Some('\\') => {
+                    self.advance();
+                    if let Some(c) = self.advance() {
+                        literal.push(c);
+                    }
+                }
+                Some('`') => {
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    self.advance();
+                    parts.push(self.read_backtick_part(span)?);
+                }
+                Some(c) => {
+                    literal.push(c);
+                    self.advance();
+                }
+            }
+        }
+
+        if !literal.is_empty() {
+            parts.push(WordPart::Literal(literal));
+        }
+        Ok(parts)
+    }
+
+    fn read_brace_word_parts(
+        &mut self,
+        in_dquote: bool,
+        span: Span,
+    ) -> std::result::Result<Vec<WordPart>, ShellError> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let mut depth = 1u32;
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated ${".into(),
+                        span,
+                    });
+                }
+                Some('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance(); // consume closing }
+                        break;
+                    }
+                    literal.push('}');
+                    self.advance();
+                }
+                // Single quotes: quoting in unquoted context (BASESYNTAX for trim ops)
+                Some('\'') if !in_dquote => {
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    self.advance_raw(); // consume opening '
+                    let mut content = String::new();
+                    loop {
+                        match self.advance_raw() {
+                            None => {
+                                return Err(ShellError::Syntax {
+                                    msg: "unterminated single quote".into(),
+                                    span,
+                                });
+                            }
+                            Some('\'') => break,
+                            Some(c) => content.push(c),
+                        }
+                    }
+                            parts.push(WordPart::SingleQuoted(content));
+                }
+                Some('"') if !in_dquote => {
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    self.advance(); // consume opening "
+                    let inner = self.read_dquote_parts(span)?;
+                            parts.push(WordPart::DoubleQuoted(inner));
+                }
+                Some('"') if in_dquote => {
+                    // Inner double quote inside "${...}" toggles context (dash's innerdq).
+                    // Content between inner quotes is effectively unquoted.
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    self.advance(); // consume opening inner "
+                    // Read until matching " with unquoted rules
+                    let inner = self.read_brace_dquote_toggle_parts(span)?;
+                    parts.extend(inner);
+                }
+                Some('$') => {
+                    self.advance(); // consume $
+                    // Don't increment depth — read_dollar handles nested ${} internally
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    if let Some(part) = self.read_dollar(in_dquote, span)? {
+                        parts.push(part);
+                    } else {
+                        literal.push('$');
+                    }
+                }
+                Some('\\') => {
+                    self.advance(); // consume backslash
+                    if let Some(c) = self.advance() {
+                        if in_dquote && matches!(c, '$' | '`' | '"' | '\\' | '\n') {
+                            if c != '\n' {
+                                literal.push(c);
+                            }
+                        } else if in_dquote {
+                            literal.push('\\');
+                            literal.push(c);
+                        } else {
+                            literal.push(c);
+                        }
+                    }
+                }
+                Some('`') => {
+                    if !literal.is_empty() {
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    self.advance(); // consume `
+                    let part = self.read_backtick_part(span)?;
+                    parts.push(part);
+                }
+                Some(c) => {
+                    literal.push(c);
+                    self.advance();
+                }
+            }
+        }
+
+        if !literal.is_empty() {
+            parts.push(WordPart::Literal(literal));
+        }
+
+        Ok(coalesce_literals(parts))
+    }
+
+    /// Read `$(...)` command substitution after `$(` has been consumed.
+    /// Collects raw text, then recursively parses it.
+    fn read_cmd_subst(&mut self, span: Span) -> std::result::Result<WordPart, ShellError> {
+        let content = self.read_cmd_subst_raw(span)?;
+        let cmd = parse_cmdsubst_content(&content);
+        Ok(WordPart::CmdSubst(Box::new(cmd)))
+    }
+
+    /// Read raw text of command substitution until matching `)`.
+    fn read_cmd_subst_raw(&mut self, span: Span) -> std::result::Result<String, ShellError> {
+        let mut content = String::new();
+        let mut depth = 1u32;
+        loop {
+            match self.advance() {
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated $(".into(),
+                        span,
+                    });
+                }
+                Some(')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(content);
+                    }
+                    content.push(')');
+                }
+                Some('(') => {
+                    depth += 1;
+                    content.push('(');
+                }
+                Some('\'') => {
+                    content.push('\'');
+                    loop {
+                        match self.advance() {
+                            None => {
+                                return Err(ShellError::Syntax {
+                                    msg: "unterminated single quote in $()".into(),
+                                    span,
+                                });
+                            }
+                            Some('\'') => {
+                                content.push('\'');
+                                break;
+                            }
+                            Some(c) => content.push(c),
+                        }
+                    }
+                }
+                Some('"') => {
+                    content.push('"');
+                    self.read_double_quoted_raw(&mut content, span)?;
+                    content.push('"');
+                }
+                Some('\\') => {
+                    content.push('\\');
+                    if let Some(c) = self.advance() {
+                        content.push(c);
+                    }
+                }
+                Some('$') => {
+                    content.push('$');
+                    self.read_dollar_raw(&mut content, span)?;
+                }
+                Some('`') => {
+                    content.push('`');
+                    self.read_backtick_raw(&mut content, span)?;
+                    content.push('`');
+                }
+                Some('#') => {
+                    // Comments inside $() are valid
+                    content.push('#');
+                    while let Some(c) = self.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        content.push(c);
+                        self.advance();
+                    }
+                }
+                Some(c) => content.push(c),
+            }
+        }
+    }
+
+    /// Read `$((expr))` arithmetic expansion after `$((` has been consumed.
+    fn read_arith_expansion(&mut self, span: Span) -> std::result::Result<WordPart, ShellError> {
+        let mut content = String::new();
+        let mut depth = 1u32;
+        loop {
+            match self.advance() {
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated $((".into(),
+                        span,
+                    });
+                }
+                Some(')') if self.peek() == Some(')') && depth == 1 => {
+                    self.advance();
+                    let inner_parts = crate::parser::parse_word_parts(&content);
+                    return Ok(WordPart::Arith(inner_parts));
+                }
+                Some(')') => {
+                    depth -= 1;
+                    content.push(')');
+                }
+                Some('(') => {
+                    depth += 1;
+                    content.push('(');
+                }
+                Some('$') => {
+                    content.push('$');
+                    self.read_dollar_raw(&mut content, span)?;
+                }
+                Some(c) => content.push(c),
+            }
+        }
+    }
+
+    /// Read backtick command substitution after opening `` ` `` consumed.
+    fn read_backtick_part(&mut self, span: Span) -> std::result::Result<WordPart, ShellError> {
+        let mut content = String::new();
+        loop {
+            match self.advance() {
+                None => {
+                    return Err(ShellError::Syntax {
+                        msg: "unterminated backtick".into(),
+                        span,
+                    });
+                }
+                Some('`') => {
+                    let cmd = parse_cmdsubst_content(&content);
+                    return Ok(WordPart::Backtick(Box::new(cmd)));
+                }
+                Some('\\') => {
+                    // In backticks, backslash only escapes $, `, and \
+                    if let Some(c) = self.advance() {
+                        if matches!(c, '$' | '`' | '\\') {
+                            content.push(c);
+                        } else {
+                            content.push('\\');
+                            content.push(c);
+                        }
+                    }
+                }
+                Some(c) => content.push(c),
+            }
+        }
+    }
+
+    /// Read inside double quotes, appending raw text to `word`.
+    /// Used for raw helpers reading nested constructs inside $().
+    fn read_double_quoted_raw(
         &mut self,
         word: &mut String,
         span: Span,
@@ -489,11 +1136,11 @@ impl Lexer {
                 }
                 Some('$') => {
                     word.push('$');
-                    self.read_dollar(word, span)?;
+                    self.read_dollar_raw(word, span)?;
                 }
                 Some('`') => {
                     word.push('`');
-                    self.read_backtick(word, span)?;
+                    self.read_backtick_raw(word, span)?;
                     word.push('`');
                 }
                 Some(c) => word.push(c),
@@ -501,9 +1148,8 @@ impl Lexer {
         }
     }
 
-    /// After consuming `$`, read what follows: `{...}`, `((...))`, `(...)`,
-    /// or a variable name. Appends raw text to `word`.
-    fn read_dollar(
+    /// After consuming `$`, read what follows, appending raw text to `word`.
+    fn read_dollar_raw(
         &mut self,
         word: &mut String,
         span: Span,
@@ -512,31 +1158,28 @@ impl Lexer {
             Some('{') => {
                 word.push('{');
                 self.advance();
-                self.read_brace_param(word, span)?;
+                self.read_brace_param_raw(word, span)?;
                 word.push('}');
             }
             Some('(') => {
                 self.advance();
-                // Check for $(( — arithmetic
                 if self.peek() == Some('(') {
                     self.advance();
                     word.push('(');
                     word.push('(');
-                    self.read_arith(word, span)?;
+                    self.read_arith_raw(word, span)?;
                     word.push(')');
                     word.push(')');
                 } else {
                     word.push('(');
-                    self.read_cmd_subst(word, span)?;
+                    self.read_cmd_subst_nested_raw(word, span)?;
                     word.push(')');
                 }
             }
-            // Special parameters: $@, $*, $#, $?, $-, $$, $!, $0-$9
             Some(c @ ('@' | '*' | '#' | '?' | '-' | '$' | '!' | '0'..='9')) => {
                 word.push(c);
                 self.advance();
             }
-            // Variable name
             Some(c) if c == '_' || c.is_ascii_alphabetic() => {
                 word.push(c);
                 self.advance();
@@ -549,14 +1192,13 @@ impl Lexer {
                     }
                 }
             }
-            // Bare $ — literal
             _ => {}
         }
         Ok(())
     }
 
-    /// Read `${...}` content after the opening `{`. Handles nested expansions.
-    fn read_brace_param(
+    /// Read `${...}` raw content after the opening `{`.
+    fn read_brace_param_raw(
         &mut self,
         word: &mut String,
         span: Span,
@@ -579,16 +1221,14 @@ impl Lexer {
                 }
                 Some('$') => {
                     word.push('$');
-                    self.read_dollar(word, span)?;
+                    self.read_dollar_raw(word, span)?;
                 }
                 Some('\'') => {
                     word.push('\'');
-                    // Inside ${}, single quotes are literal in POSIX
-                    // (they don't quote). Just read the char.
                 }
                 Some('"') => {
                     word.push('"');
-                    self.read_double_quoted(word, span)?;
+                    self.read_double_quoted_raw(word, span)?;
                     word.push('"');
                 }
                 Some('\\') => {
@@ -599,7 +1239,7 @@ impl Lexer {
                 }
                 Some('`') => {
                     word.push('`');
-                    self.read_backtick(word, span)?;
+                    self.read_backtick_raw(word, span)?;
                     word.push('`');
                 }
                 Some(c) => word.push(c),
@@ -607,8 +1247,8 @@ impl Lexer {
         }
     }
 
-    /// Read `$(...)` command substitution content after the opening `(`.
-    fn read_cmd_subst(
+    /// Read `$(...)` raw content (nested inside another raw read).
+    fn read_cmd_subst_nested_raw(
         &mut self,
         word: &mut String,
         span: Span,
@@ -653,7 +1293,7 @@ impl Lexer {
                 }
                 Some('"') => {
                     word.push('"');
-                    self.read_double_quoted(word, span)?;
+                    self.read_double_quoted_raw(word, span)?;
                     word.push('"');
                 }
                 Some('\\') => {
@@ -664,15 +1304,14 @@ impl Lexer {
                 }
                 Some('$') => {
                     word.push('$');
-                    self.read_dollar(word, span)?;
+                    self.read_dollar_raw(word, span)?;
                 }
                 Some('`') => {
                     word.push('`');
-                    self.read_backtick(word, span)?;
+                    self.read_backtick_raw(word, span)?;
                     word.push('`');
                 }
                 Some('#') => {
-                    // Comments inside $() are valid
                     word.push('#');
                     while let Some(c) = self.peek() {
                         if c == '\n' {
@@ -687,9 +1326,12 @@ impl Lexer {
         }
     }
 
-    /// Read `$((...))` arithmetic content after the opening `((`.
-    fn read_arith(&mut self, word: &mut String, span: Span) -> std::result::Result<(), ShellError> {
-        // Need to find matching ))
+    /// Read `$((...))` raw content.
+    fn read_arith_raw(
+        &mut self,
+        word: &mut String,
+        span: Span,
+    ) -> std::result::Result<(), ShellError> {
         let mut depth = 1u32;
         loop {
             match self.advance() {
@@ -713,15 +1355,15 @@ impl Lexer {
                 }
                 Some('$') => {
                     word.push('$');
-                    self.read_dollar(word, span)?;
+                    self.read_dollar_raw(word, span)?;
                 }
                 Some(c) => word.push(c),
             }
         }
     }
 
-    /// Read backtick command substitution content after the opening `` ` ``.
-    fn read_backtick(
+    /// Read backtick content, appending raw text to `word`.
+    fn read_backtick_raw(
         &mut self,
         word: &mut String,
         span: Span,
@@ -736,7 +1378,6 @@ impl Lexer {
                 }
                 Some('`') => return Ok(()),
                 Some('\\') => {
-                    // In backticks, backslash only escapes $, `, and \
                     word.push('\\');
                     if let Some(c) = self.advance() {
                         word.push(c);
@@ -831,6 +1472,120 @@ pub fn is_name(s: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// Extract the text from a word that is a single Literal part.
+fn single_literal_text(parts: &[WordPart]) -> Option<&str> {
+    if parts.len() == 1
+        && let WordPart::Literal(s) = &parts[0]
+    {
+        return Some(s);
+    }
+    None
+}
+
+/// Try to split a word's parts into an assignment (name=value).
+/// Returns Some((name, value_parts)) if the first Literal starts with `name=`.
+fn try_split_assignment(parts: &[WordPart]) -> Option<(String, Vec<WordPart>)> {
+    if let Some(WordPart::Literal(first)) = parts.first()
+        && let Some(eq_pos) = first.find('=')
+    {
+        let name = &first[..eq_pos];
+        if !name.is_empty() && is_name(name) {
+            let name = name.to_string();
+            let rest_of_first = &first[eq_pos + 1..];
+            let mut value_parts = Vec::new();
+            if !rest_of_first.is_empty() {
+                value_parts.push(WordPart::Literal(rest_of_first.to_string()));
+            }
+            for part in &parts[1..] {
+                value_parts.push(part.clone());
+            }
+            return Some((name, value_parts));
+        }
+    }
+    None
+}
+
+/// Coalesce adjacent Literal parts.
+fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
+    let mut result = Vec::with_capacity(parts.len());
+    for part in parts {
+        if let WordPart::Literal(ref s) = part
+            && let Some(WordPart::Literal(prev)) = result.last_mut()
+        {
+            prev.push_str(s);
+            continue;
+        }
+        result.push(part);
+    }
+    result
+}
+
+/// Extract the plain text from word parts (for heredoc delimiter, func name, for-var, etc.).
+/// Only extracts from Literal and SingleQuoted parts.
+pub fn parts_to_text(parts: &[WordPart]) -> String {
+    let mut s = String::new();
+    for part in parts {
+        match part {
+            WordPart::Literal(t) => s.push_str(t),
+            WordPart::SingleQuoted(t) => s.push_str(t),
+            WordPart::DoubleQuoted(inner) => {
+                s.push_str(&parts_to_text(inner));
+            }
+            _ => {} // non-text parts ignored for raw text extraction
+        }
+    }
+    s
+}
+
+/// Check if any part contains quoting (for heredoc quoted-delimiter detection).
+pub fn parts_have_quoting(parts: &[WordPart]) -> bool {
+    for part in parts {
+        match part {
+            WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_) => return true,
+            WordPart::Literal(s) if s.contains('\\') => return true,
+            // Any non-Literal part indicates quoting/expansion happened
+            WordPart::Param(_)
+            | WordPart::CmdSubst(_)
+            | WordPart::Backtick(_)
+            | WordPart::Arith(_)
+            | WordPart::Tilde(_) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Parse command substitution content by recursively invoking the parser.
+fn parse_cmdsubst_content(content: &str) -> Command {
+    match crate::parser::Parser::new(content).parse() {
+        Ok(program) => {
+            if program.commands.is_empty() {
+                Command::Simple {
+                    assigns: Vec::new(),
+                    args: Vec::new(),
+                    redirs: Vec::new(),
+                    span: Span::default(),
+                }
+            } else if program.commands.len() == 1 {
+                program.commands.into_iter().next().unwrap()
+            } else {
+                let mut iter = program.commands.into_iter();
+                let mut result = iter.next().unwrap();
+                for cmd in iter {
+                    result = Command::Sequence(Box::new(result), Box::new(cmd));
+                }
+                result
+            }
+        }
+        Err(_) => Command::Simple {
+            assigns: Vec::new(),
+            args: Vec::new(),
+            redirs: Vec::new(),
+            span: Span::default(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,143 +1603,150 @@ mod tests {
         toks
     }
 
+    /// Helper: check that a token is Word with a single Literal part.
+    fn is_word(tok: &Token, expected: &str) -> bool {
+        match tok {
+            Token::Word(parts, _) => single_literal_text(parts) == Some(expected),
+            _ => false,
+        }
+    }
+
     #[test]
     fn simple_command() {
-        assert_eq!(
-            tokens("echo hello"),
-            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
-        );
+        let toks = tokens("echo hello");
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        assert!(is_word(&toks[1], "hello"));
     }
 
     #[test]
     fn pipeline() {
-        assert_eq!(
-            tokens("ls | grep foo"),
-            vec![
-                Token::Word("ls".into()),
-                Token::Pipe,
-                Token::Word("grep".into()),
-                Token::Word("foo".into()),
-            ]
-        );
+        let toks = tokens("ls | grep foo");
+        assert_eq!(toks.len(), 4);
+        assert!(is_word(&toks[0], "ls"));
+        assert_eq!(toks[1], Token::Pipe);
+        assert!(is_word(&toks[2], "grep"));
+        assert!(is_word(&toks[3], "foo"));
     }
 
     #[test]
     fn and_or() {
-        assert_eq!(
-            tokens("a && b || c"),
-            vec![
-                Token::Word("a".into()),
-                Token::And,
-                Token::Word("b".into()),
-                Token::Or,
-                Token::Word("c".into()),
-            ]
-        );
+        let toks = tokens("a && b || c");
+        assert_eq!(toks.len(), 5);
+        assert!(is_word(&toks[0], "a"));
+        assert_eq!(toks[1], Token::And);
+        assert!(is_word(&toks[2], "b"));
+        assert_eq!(toks[3], Token::Or);
+        assert!(is_word(&toks[4], "c"));
     }
 
     #[test]
     fn redirections() {
-        // "in" is a reserved word, so the lexer returns Token::In here.
-        // The parser handles context: after a redir operator, it accepts
-        // reserved words as filenames.
-        assert_eq!(
-            tokens("cat < in > out 2>&1"),
-            vec![
-                Token::Word("cat".into()),
-                Token::Less,
-                Token::In,
-                Token::Great,
-                Token::Word("out".into()),
-                Token::Word("2".into()),
-                Token::GreatAnd,
-                Token::Word("1".into()),
-            ]
-        );
+        let toks = tokens("cat < in > out 2>&1");
+        assert_eq!(toks.len(), 8);
+        assert!(is_word(&toks[0], "cat"));
+        assert_eq!(toks[1], Token::Less);
+        assert_eq!(toks[2], Token::In);
+        assert_eq!(toks[3], Token::Great);
+        assert!(is_word(&toks[4], "out"));
+        assert!(is_word(&toks[5], "2"));
+        assert_eq!(toks[6], Token::GreatAnd);
+        assert!(is_word(&toks[7], "1"));
     }
 
     #[test]
     fn redir_filename() {
-        // Non-reserved filenames work fine
-        assert_eq!(
-            tokens("cat < input.txt"),
-            vec![
-                Token::Word("cat".into()),
-                Token::Less,
-                Token::Word("input.txt".into()),
-            ]
-        );
+        let toks = tokens("cat < input.txt");
+        assert_eq!(toks.len(), 3);
+        assert!(is_word(&toks[0], "cat"));
+        assert_eq!(toks[1], Token::Less);
+        assert!(is_word(&toks[2], "input.txt"));
     }
 
     #[test]
     fn single_quotes() {
-        assert_eq!(
-            tokens("echo 'hello world'"),
-            vec![
-                Token::Word("echo".into()),
-                Token::Word("'hello world'".into()),
-            ]
-        );
+        let toks = tokens("echo 'hello world'");
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        match &toks[1] {
+            Token::Word(parts, _) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], WordPart::SingleQuoted(s) if s == "hello world"));
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
     }
 
     #[test]
     fn double_quotes() {
-        assert_eq!(
-            tokens(r#"echo "hello $name""#),
-            vec![
-                Token::Word("echo".into()),
-                Token::Word("\"hello $name\"".into()),
-            ]
-        );
+        let toks = tokens(r#"echo "hello $name""#);
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        match &toks[1] {
+            Token::Word(parts, _) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    WordPart::DoubleQuoted(inner) => {
+                        assert_eq!(inner.len(), 2);
+                        assert!(matches!(&inner[0], WordPart::Literal(s) if s == "hello "));
+                        assert!(matches!(&inner[1], WordPart::Param(p) if p.name == "name"));
+                    }
+                    other => panic!("expected DoubleQuoted, got {other:?}"),
+                }
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
     }
 
     #[test]
     fn command_substitution() {
-        assert_eq!(
-            tokens("echo $(date)"),
-            vec![Token::Word("echo".into()), Token::Word("$(date)".into()),]
-        );
+        let toks = tokens("echo $(date)");
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        match &toks[1] {
+            Token::Word(parts, _) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], WordPart::CmdSubst(_)));
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
     }
 
     #[test]
     fn assignment() {
         let toks = tokens("FOO=bar");
-        assert_eq!(
-            toks,
-            vec![Token::Assignment {
-                name: "FOO".into(),
-                value: "bar".into()
-            },]
-        );
+        assert_eq!(toks.len(), 1);
+        match &toks[0] {
+            Token::Assignment { name, value } => {
+                assert_eq!(name, "FOO");
+                assert_eq!(value.len(), 1);
+                assert!(matches!(&value[0], WordPart::Literal(s) if s == "bar"));
+            }
+            other => panic!("expected Assignment, got {other:?}"),
+        }
     }
 
     #[test]
     fn reserved_words() {
-        assert_eq!(
-            tokens("if true; then echo yes; fi"),
-            vec![
-                Token::If,
-                Token::Word("true".into()),
-                Token::Semi,
-                Token::Then,
-                Token::Word("echo".into()),
-                Token::Word("yes".into()),
-                Token::Semi,
-                Token::Fi,
-            ]
-        );
+        let toks = tokens("if true; then echo yes; fi");
+        assert_eq!(toks.len(), 8);
+        assert_eq!(toks[0], Token::If);
+        assert!(is_word(&toks[1], "true"));
+        assert_eq!(toks[2], Token::Semi);
+        assert_eq!(toks[3], Token::Then);
+        assert!(is_word(&toks[4], "echo"));
+        assert!(is_word(&toks[5], "yes"));
+        assert_eq!(toks[6], Token::Semi);
+        assert_eq!(toks[7], Token::Fi);
     }
 
     #[test]
     fn background() {
-        assert_eq!(
-            tokens("sleep 10 &"),
-            vec![
-                Token::Word("sleep".into()),
-                Token::Word("10".into()),
-                Token::Amp,
-            ]
-        );
+        let toks = tokens("sleep 10 &");
+        assert_eq!(toks.len(), 3);
+        assert!(is_word(&toks[0], "sleep"));
+        assert!(is_word(&toks[1], "10"));
+        assert_eq!(toks[2], Token::Amp);
     }
 
     #[test]
@@ -994,43 +1756,59 @@ mod tests {
 
     #[test]
     fn dollar_brace() {
-        assert_eq!(
-            tokens("${var:-default}"),
-            vec![Token::Word("${var:-default}".into()),]
-        );
+        let toks = tokens("${var:-default}");
+        assert_eq!(toks.len(), 1);
+        match &toks[0] {
+            Token::Word(parts, _) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    WordPart::Param(p) => {
+                        assert_eq!(p.name, "var");
+                        assert!(matches!(p.op, ParamOp::Default { colon: true, .. }));
+                    }
+                    other => panic!("expected Param, got {other:?}"),
+                }
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
     }
 
     #[test]
     fn arithmetic() {
-        assert_eq!(tokens("$((1+2))"), vec![Token::Word("$((1+2))".into()),]);
+        let toks = tokens("$((1+2))");
+        assert_eq!(toks.len(), 1);
+        match &toks[0] {
+            Token::Word(parts, _) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], WordPart::Arith(_)));
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
     }
 
     #[test]
     fn heredoc_operator() {
-        assert_eq!(
-            tokens("cat << EOF"),
-            vec![
-                Token::Word("cat".into()),
-                Token::DLess,
-                Token::Word("EOF".into()),
-            ]
-        );
+        let toks = tokens("cat << EOF");
+        assert_eq!(toks.len(), 3);
+        assert!(is_word(&toks[0], "cat"));
+        assert_eq!(toks[1], Token::DLess);
+        assert!(is_word(&toks[2], "EOF"));
     }
 
     #[test]
     fn comments() {
-        assert_eq!(
-            tokens("echo hello # comment"),
-            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
-        );
+        let toks = tokens("echo hello # comment");
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        assert!(is_word(&toks[1], "hello"));
     }
 
     #[test]
     fn backslash_newline() {
-        assert_eq!(
-            tokens("echo hel\\\nlo"),
-            vec![Token::Word("echo".into()), Token::Word("hello".into()),]
-        );
+        let toks = tokens("echo hel\\\nlo");
+        assert_eq!(toks.len(), 2);
+        assert!(is_word(&toks[0], "echo"));
+        assert!(is_word(&toks[1], "hello"));
     }
 
     #[test]
