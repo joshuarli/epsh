@@ -65,6 +65,8 @@ pub fn expand_word_to_string(
 }
 
 /// Expand a list of WordParts into ExpandedWord fragments.
+/// `in_param_word`: true when expanding inside ${var+word} etc. — literals should
+/// be marked for field splitting since they're part of an expansion result.
 fn expand_word_parts(
     parts: &[WordPart],
     vars: &mut Variables,
@@ -73,6 +75,18 @@ fn expand_word_parts(
     quoted_context: bool,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> crate::error::Result<Vec<ExpandedWord>> {
+    expand_word_parts_inner(parts, vars, exit_status, shell_pid, quoted_context, cmd_subst, false)
+}
+
+fn expand_word_parts_inner(
+    parts: &[WordPart],
+    vars: &mut Variables,
+    exit_status: ExitStatus,
+    shell_pid: u32,
+    quoted_context: bool,
+    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    in_param_word: bool,
+) -> crate::error::Result<Vec<ExpandedWord>> {
     let mut result = Vec::new();
 
     for part in parts {
@@ -80,7 +94,8 @@ fn expand_word_parts(
             WordPart::Literal(s) => {
                 result.push(ExpandedWord {
                     value: s.clone(),
-                    split_fields: false,
+                    // Literals from ${...} words are subject to field splitting
+                    split_fields: in_param_word && !quoted_context,
                     word_break: false,
                 });
             }
@@ -318,13 +333,14 @@ fn expand_param_to_fragments(
                 raw_value.is_none()
             };
             if is_unset {
-                let frags = expand_word_parts(
+                let frags = expand_word_parts_inner(
                     word,
                     vars,
                     exit_status,
                     shell_pid,
                     quoted_context,
                     cmd_subst,
+                    true, // in_param_word: literals subject to field splitting
                 )?;
                 if matches!(param.op, ParamOp::Assign { .. }) {
                     let val: String = frags.iter().map(|f| f.value.clone()).collect();
@@ -375,13 +391,14 @@ fn expand_param_to_fragments(
             if is_unset {
                 Ok(vec![])
             } else {
-                let frags = expand_word_parts(
+                let frags = expand_word_parts_inner(
                     word,
                     vars,
                     exit_status,
                     shell_pid,
                     quoted_context,
                     cmd_subst,
+                    true, // in_param_word
                 )?;
                 Ok(frags)
             }
