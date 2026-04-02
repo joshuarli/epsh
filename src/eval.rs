@@ -3,7 +3,7 @@ use std::io::Read;
 use std::os::unix::io::{FromRawFd, RawFd};
 
 use crate::ast::*;
-use crate::error::{ShellError, Span};
+use crate::error::{ExitStatus, ShellError, Span};
 use crate::expand;
 use crate::glob;
 use crate::parser::Parser;
@@ -16,7 +16,7 @@ pub struct Shell {
     /// Defined functions: name → AST body
     pub functions: HashMap<String, Command>,
     /// Last command's exit status ($?)
-    pub exit_status: i32,
+    pub exit_status: ExitStatus,
     /// Shell's PID ($$)
     pub pid: u32,
     /// Number of nested loops (for break/continue counting)
@@ -53,7 +53,7 @@ impl Shell {
         Shell {
             vars: Variables::new(),
             functions: HashMap::new(),
-            exit_status: 0,
+            exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
             loop_depth: 0,
             opts: ShellOpts::default(),
@@ -81,11 +81,11 @@ impl Shell {
                 }
                 Err(ShellError::Exit(n)) => {
                     self.run_exit_trap();
-                    return n;
+                    return n.0;
                 }
                 Err(e) => {
                     eprintln!("epsh: {e}");
-                    self.exit_status = 1;
+                    self.exit_status = ExitStatus::FAILURE;
                     if self.opts.errexit {
                         self.run_exit_trap();
                         return 1;
@@ -95,7 +95,7 @@ impl Shell {
         }
 
         self.run_exit_trap();
-        self.exit_status
+        self.exit_status.0
     }
 
     /// Run the EXIT trap if one is set.
@@ -176,7 +176,7 @@ impl Shell {
     }
 
     /// Evaluate a command node, returning its exit status.
-    pub fn eval_command(&mut self, cmd: &Command) -> crate::error::Result<i32> {
+    pub fn eval_command(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
         let status = self.eval_command_inner(cmd)?;
         self.exit_status = status;
 
@@ -191,14 +191,14 @@ impl Shell {
                 | Command::Subshell { .. }
                 | Command::Background { .. }
         );
-        if self.opts.errexit && is_leaf && !self.tested && status != 0 {
+        if self.opts.errexit && is_leaf && !self.tested && !status.success() {
             return Err(ShellError::Exit(status));
         }
 
         Ok(status)
     }
 
-    fn eval_command_inner(&mut self, cmd: &Command) -> crate::error::Result<i32> {
+    fn eval_command_inner(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
         match cmd {
             Command::Simple {
                 assigns,
@@ -212,9 +212,15 @@ impl Shell {
                 bang,
                 span: _,
             } => {
+                // bang (!) suppresses errexit, like dash's EV_TESTED
+                let saved = self.tested;
+                if *bang {
+                    self.tested = true;
+                }
                 let status = self.eval_pipeline(commands)?;
+                self.tested = saved;
                 Ok(if *bang {
-                    if status == 0 { 1 } else { 0 }
+                    ExitStatus(status.success() as i32)
                 } else {
                     status
                 })
@@ -227,7 +233,7 @@ impl Shell {
                 let status = self.eval_command(left)?;
                 self.tested = saved;
                 self.exit_status = status;
-                if status == 0 {
+                if status.success() {
                     // Right side inherits parent's tested flag (like dash)
                     self.eval_command(right)
                 } else {
@@ -241,7 +247,7 @@ impl Shell {
                 let status = self.eval_command(left)?;
                 self.tested = saved;
                 self.exit_status = status;
-                if status != 0 {
+                if !status.success() {
                     self.eval_command(right)
                 } else {
                     Ok(status)
@@ -285,25 +291,25 @@ impl Shell {
                 let cond_status = self.eval_command(cond)?;
                 self.tested = saved;
                 self.exit_status = cond_status;
-                if cond_status == 0 {
+                if cond_status.success() {
                     self.eval_command(then_part)
                 } else if let Some(else_part) = else_part {
                     self.eval_command(else_part)
                 } else {
-                    Ok(0)
+                    Ok(ExitStatus::SUCCESS)
                 }
             }
 
             Command::While { cond, body, .. } => {
                 self.loop_depth += 1;
-                let mut last_status = 0;
+                let mut last_status = ExitStatus::SUCCESS;
                 loop {
                     let saved = self.tested;
                     self.tested = true;
                     let cond_status = self.eval_command(cond)?;
                     self.tested = saved;
                     self.exit_status = cond_status;
-                    if cond_status != 0 {
+                    if !cond_status.success() {
                         break;
                     }
                     match self.eval_command(body) {
@@ -330,14 +336,14 @@ impl Shell {
 
             Command::Until { cond, body, .. } => {
                 self.loop_depth += 1;
-                let mut last_status = 0;
+                let mut last_status = ExitStatus::SUCCESS;
                 loop {
                     let saved = self.tested;
                     self.tested = true;
                     let cond_status = self.eval_command(cond)?;
                     self.tested = saved;
                     self.exit_status = cond_status;
-                    if cond_status == 0 {
+                    if cond_status.success() {
                         break;
                     }
                     match self.eval_command(body) {
@@ -377,7 +383,7 @@ impl Shell {
                 };
 
                 self.loop_depth += 1;
-                let mut last_status = 0;
+                let mut last_status = ExitStatus::SUCCESS;
                 for value in &word_list {
                     let _ = self.vars.set(var, value);
                     match self.eval_command(body) {
@@ -412,17 +418,17 @@ impl Shell {
                             if let Some(ref body) = arm.body {
                                 return self.eval_command(body);
                             } else {
-                                return Ok(0);
+                                return Ok(ExitStatus::SUCCESS);
                             }
                         }
                     }
                 }
-                Ok(0)
+                Ok(ExitStatus::SUCCESS)
             }
 
             Command::FuncDef { name, body, .. } => {
                 self.functions.insert(name.clone(), *body.clone());
-                Ok(0)
+                Ok(ExitStatus::SUCCESS)
             }
 
             Command::Not(cmd) => {
@@ -430,7 +436,7 @@ impl Shell {
                 self.tested = true;
                 let status = self.eval_command(cmd)?;
                 self.tested = saved;
-                Ok(if status == 0 { 1 } else { 0 })
+                Ok(ExitStatus(status.success() as i32))
             }
 
             Command::Background { cmd, redirs } => {
@@ -447,7 +453,7 @@ impl Shell {
         args: &[Word],
         redirs: &[Redir],
         span: Span,
-    ) -> crate::error::Result<i32> {
+    ) -> crate::error::Result<ExitStatus> {
         // Expand arguments
         let mut expanded_args: Vec<String> = Vec::new();
         for arg in args {
@@ -462,7 +468,7 @@ impl Shell {
                     .set(&assign.name, &value)
                     .map_err(|msg| ShellError::Runtime { msg, span })?;
             }
-            return Ok(0);
+            return Ok(ExitStatus::SUCCESS);
         }
 
         let cmd_name = &expanded_args[0];
@@ -491,7 +497,7 @@ impl Shell {
         assigns: &[Assignment],
         redirs: &[Redir],
         _span: Span,
-    ) -> crate::error::Result<i32> {
+    ) -> crate::error::Result<ExitStatus> {
         // Save and set positional parameters
         let saved_positional = self.vars.positional.clone();
         self.vars.positional = args[1..].to_vec();
@@ -531,7 +537,7 @@ impl Shell {
         assigns: &[Assignment],
         redirs: &[Redir],
         _span: Span,
-    ) -> crate::error::Result<i32> {
+    ) -> crate::error::Result<ExitStatus> {
         let saved = self.setup_redirections(redirs)?;
 
         let mut cmd = std::process::Command::new(&args[0]);
@@ -551,15 +557,15 @@ impl Shell {
         let result = match cmd.status() {
             Ok(status) => {
                 let code = status.code().unwrap_or(128);
-                Ok(code)
+                Ok(ExitStatus(code))
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     eprintln!("{}: not found", args[0]);
-                    Ok(127)
+                    Ok(ExitStatus::NOT_FOUND)
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
                     eprintln!("{}: permission denied", args[0]);
-                    Ok(126)
+                    Ok(ExitStatus::NOT_EXECUTABLE)
                 } else {
                     Err(ShellError::Io(e))
                 }
@@ -571,7 +577,7 @@ impl Shell {
     }
 
     /// Execute a pipeline.
-    fn eval_pipeline(&mut self, commands: &[Command]) -> crate::error::Result<i32> {
+    fn eval_pipeline(&mut self, commands: &[Command]) -> crate::error::Result<ExitStatus> {
         if commands.len() == 1 {
             return self.eval_command(&commands[0]);
         }
@@ -617,9 +623,9 @@ impl Shell {
                     let status = match self.eval_command(cmd) {
                         Ok(s) => s,
                         Err(ShellError::Exit(n)) => n,
-                        Err(_) => 1,
+                        Err(_) => ExitStatus::FAILURE,
                     };
-                    sys::exit_child(status);
+                    sys::exit_child(status.0);
                 }
 
                 children.push(pid);
@@ -635,18 +641,14 @@ impl Shell {
         }
 
         // Wait for all children, return status of the last one
-        let mut last_status = 0;
+        let mut last_status = ExitStatus::SUCCESS;
         for (i, &pid) in children.iter().enumerate() {
             let mut status = 0i32;
             unsafe {
                 sys::waitpid(pid, &mut status, 0);
             }
             if i == children.len() - 1 {
-                if sys::wifexited(status) {
-                    last_status = sys::wexitstatus(status);
-                } else {
-                    last_status = 128 + sys::wtermsig(status);
-                }
+                last_status = ExitStatus::from_wait(status);
             }
         }
 
@@ -654,7 +656,7 @@ impl Shell {
     }
 
     /// Execute a command in a subshell (fork).
-    fn eval_in_subshell(&mut self, body: &Command, redirs: &[Redir]) -> crate::error::Result<i32> {
+    fn eval_in_subshell(&mut self, body: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -674,26 +676,22 @@ impl Shell {
                 let status = match self.eval_command(body) {
                     Ok(s) => s,
                     Err(ShellError::Exit(n)) => n,
-                    Err(_) => 1,
+                    Err(_) => ExitStatus::FAILURE,
                 };
                 // Run subshell's own EXIT trap if it set one
                 self.run_exit_trap();
-                sys::exit_child(status);
+                sys::exit_child(status.0);
             }
 
             // Parent
             let mut status = 0i32;
             sys::waitpid(pid, &mut status, 0);
-            if sys::wifexited(status) {
-                Ok(sys::wexitstatus(status))
-            } else {
-                Ok(128 + sys::wtermsig(status))
-            }
+            Ok(ExitStatus::from_wait(status))
         }
     }
 
     /// Execute a command in the background.
-    fn eval_background(&mut self, cmd: &Command, redirs: &[Redir]) -> crate::error::Result<i32> {
+    fn eval_background(&mut self, cmd: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -708,13 +706,13 @@ impl Shell {
                 let status = match self.eval_command(cmd) {
                     Ok(s) => s,
                     Err(ShellError::Exit(n)) => n,
-                    Err(_) => 1,
+                    Err(_) => ExitStatus::FAILURE,
                 };
-                sys::exit_child(status);
+                sys::exit_child(status.0);
             }
 
             // Don't wait — background process
-            Ok(0)
+            Ok(ExitStatus::SUCCESS)
         }
     }
 
@@ -742,9 +740,9 @@ impl Shell {
                 let status = match self.eval_command(cmd) {
                     Ok(s) => s,
                     Err(ShellError::Exit(n)) => n,
-                    Err(_) => 1,
+                    Err(_) => ExitStatus::FAILURE,
                 };
-                sys::exit_child(status);
+                sys::exit_child(status.0);
             }
 
             // Parent: read from read end
@@ -757,7 +755,7 @@ impl Shell {
             let mut status = 0i32;
             sys::waitpid(pid, &mut status, 0);
             if sys::wifexited(status) {
-                self.exit_status = sys::wexitstatus(status);
+                self.exit_status = ExitStatus(sys::wexitstatus(status));
             }
 
             // Remove trailing newlines (POSIX requirement)
@@ -872,9 +870,9 @@ mod tests {
     fn run_exit_status() {
         let mut shell = Shell::new();
         shell.run_script("false");
-        assert_eq!(shell.exit_status, 1);
+        assert_eq!(shell.exit_status, ExitStatus::FAILURE);
         shell.run_script("true");
-        assert_eq!(shell.exit_status, 0);
+        assert_eq!(shell.exit_status, ExitStatus::SUCCESS);
     }
 
     #[test]

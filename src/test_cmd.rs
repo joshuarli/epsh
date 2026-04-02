@@ -1,13 +1,14 @@
+use crate::error::ExitStatus;
 use crate::sys;
 
 /// Full POSIX test/[ implementation with compound expressions.
-pub(crate) fn test_eval(args: &[&str]) -> i32 {
+pub(crate) fn test_eval(args: &[&str]) -> ExitStatus {
     if args.is_empty() {
-        return 1;
+        return ExitStatus::FAILURE;
     }
     let mut pos = 0;
     let result = test_or(args, &mut pos);
-    if result { 0 } else { 1 }
+    if result { ExitStatus::SUCCESS } else { ExitStatus::FAILURE }
 }
 
 fn test_or(args: &[&str], pos: &mut usize) -> bool {

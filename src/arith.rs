@@ -21,12 +21,13 @@
 //!   ! ~ + - (unary)                       (unary)
 //! ```
 
+use crate::error::ExitStatus;
 use crate::var::Variables;
 
 pub fn eval_arith(
     expr: &str,
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
 ) -> Result<i64, String> {
     let tokens = tokenize(expr)?;
@@ -302,7 +303,7 @@ struct ArithParser<'a> {
     tokens: Vec<ArithToken>,
     pos: usize,
     vars: &'a mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
 }
 
@@ -672,11 +673,11 @@ mod tests {
 
     fn eval(expr: &str) -> i64 {
         let mut vars = Variables::new();
-        eval_arith(expr, &mut vars, 0, 1).unwrap()
+        eval_arith(expr, &mut vars, ExitStatus::SUCCESS, 1).unwrap()
     }
 
     fn eval_with_vars(expr: &str, vars: &mut Variables) -> i64 {
-        eval_arith(expr, vars, 0, 1).unwrap()
+        eval_arith(expr, vars, ExitStatus::SUCCESS, 1).unwrap()
     }
 
     #[test]
@@ -771,8 +772,8 @@ mod tests {
     #[test]
     fn division_by_zero() {
         let mut vars = Variables::new();
-        assert!(eval_arith("1 / 0", &mut vars, 0, 1).is_err());
-        assert!(eval_arith("1 % 0", &mut vars, 0, 1).is_err());
+        assert!(eval_arith("1 / 0", &mut vars, ExitStatus::SUCCESS, 1).is_err());
+        assert!(eval_arith("1 % 0", &mut vars, ExitStatus::SUCCESS, 1).is_err());
     }
 
     #[test]

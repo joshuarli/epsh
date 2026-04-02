@@ -1,5 +1,6 @@
 use crate::arith;
 use crate::ast::*;
+use crate::error::ExitStatus;
 use crate::glob;
 use crate::var::Variables;
 
@@ -20,7 +21,7 @@ pub struct ExpandedWord {
 pub fn expand_word_to_fields(
     word: &Word,
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> Vec<String> {
@@ -55,7 +56,7 @@ pub fn expand_word_to_fields(
 pub fn expand_word_to_string(
     word: &Word,
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> String {
@@ -67,7 +68,7 @@ pub fn expand_word_to_string(
 fn expand_word_parts(
     parts: &[WordPart],
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     quoted_context: bool,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
@@ -270,7 +271,7 @@ fn expand_word_parts(
 fn expand_param_to_fragments(
     param: &ParamExpr,
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
     quoted_context: bool,
@@ -407,7 +408,7 @@ fn expand_param_to_fragments(
 fn expand_param(
     param: &ParamExpr,
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> String {
@@ -517,7 +518,7 @@ fn expand_param(
 fn expand_param_word(
     parts: &[WordPart],
     vars: &mut Variables,
-    exit_status: i32,
+    exit_status: ExitStatus,
     shell_pid: u32,
     cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> String {
@@ -698,7 +699,7 @@ mod tests {
         let mut vars = make_vars();
         let word = make_word(vec![WordPart::Literal("hello".into())]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["hello"]
         );
     }
@@ -712,7 +713,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["hello"]
         );
     }
@@ -729,7 +730,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["fallback"]
         );
     }
@@ -746,7 +747,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["fallback"]
         );
     }
@@ -763,7 +764,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["hello"]
         );
     }
@@ -780,7 +781,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["assigned"]
         );
         assert_eq!(vars.get("NEW_VAR"), Some("assigned"));
@@ -798,7 +799,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["alt"]
         );
     }
@@ -814,7 +815,7 @@ mod tests {
             },
             span: Span::default(),
         })]);
-        let result = expand_word_to_fields(&word, &mut vars, 0, 1, &mut None);
+        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None);
         assert!(result.is_empty() || result == vec![""]);
     }
 
@@ -827,7 +828,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["5"]
         );
     }
@@ -841,7 +842,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["archive.tar"]
         );
     }
@@ -855,7 +856,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["archive"]
         );
     }
@@ -869,7 +870,7 @@ mod tests {
             span: Span::default(),
         })]);
         // Smallest prefix matching */: removes "/" (since */ matches "/")
-        let result = expand_word_to_fields(&word, &mut vars, 0, 1, &mut None);
+        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None);
         assert_eq!(result, vec!["usr/local/bin:/usr/bin:/bin"]);
     }
 
@@ -882,7 +883,7 @@ mod tests {
             span: Span::default(),
         })]);
         // Largest prefix matching */: removes everything up to last /
-        let result = expand_word_to_fields(&word, &mut vars, 0, 1, &mut None);
+        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None);
         assert_eq!(result, vec!["bin"]);
     }
 
@@ -893,7 +894,7 @@ mod tests {
             WordPart::Tilde(String::new()),
             WordPart::Literal("/bin".into()),
         ]);
-        let result = expand_word_to_string(&word, &mut vars, 0, 1, &mut None);
+        let result = expand_word_to_string(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None);
         let home = std::env::var("HOME").unwrap();
         assert_eq!(result, format!("{home}/bin"));
     }
@@ -903,7 +904,7 @@ mod tests {
         let mut vars = make_vars();
         let word = make_word(vec![WordPart::SingleQuoted("$FOO".into())]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["$FOO"]
         );
     }
@@ -921,7 +922,7 @@ mod tests {
         )])]);
         // Inside double quotes, no field splitting
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 0, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None),
             vec!["a  b  c"]
         );
     }
@@ -975,7 +976,7 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, 42, 1, &mut None),
+            expand_word_to_fields(&word, &mut vars, ExitStatus(42), 1, &mut None),
             vec!["42"]
         );
     }

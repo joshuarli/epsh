@@ -22,9 +22,9 @@ impl fmt::Display for Span {
 #[derive(Debug)]
 pub enum ShellError {
     /// `exit [n]` — terminate the shell
-    Exit(i32),
+    Exit(ExitStatus),
     /// `return [n]` — return from function or dot-script
-    Return(i32),
+    Return(ExitStatus),
     /// `break [n]` — break from n enclosing loops
     Break(usize),
     /// `continue [n]` — continue nth enclosing loop
@@ -70,3 +70,51 @@ impl From<std::io::Error> for ShellError {
 }
 
 pub type Result<T> = std::result::Result<T, ShellError>;
+
+/// Shell exit status (0-255). Provides type safety over bare i32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExitStatus(pub i32);
+
+impl ExitStatus {
+    pub const SUCCESS: ExitStatus = ExitStatus(0);
+    pub const FAILURE: ExitStatus = ExitStatus(1);
+    pub const MISUSE: ExitStatus = ExitStatus(2);
+    pub const NOT_FOUND: ExitStatus = ExitStatus(127);
+    pub const NOT_EXECUTABLE: ExitStatus = ExitStatus(126);
+
+    pub fn success(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Create from a process wait status (as returned by waitpid).
+    pub fn from_wait(status: i32) -> Self {
+        if crate::sys::wifexited(status) {
+            ExitStatus(crate::sys::wexitstatus(status))
+        } else {
+            ExitStatus(128 + crate::sys::wtermsig(status))
+        }
+    }
+
+    /// Create from a signal number (128 + sig).
+    pub fn from_signal(sig: i32) -> Self {
+        ExitStatus(128 + sig)
+    }
+}
+
+impl From<i32> for ExitStatus {
+    fn from(n: i32) -> Self {
+        ExitStatus(n)
+    }
+}
+
+impl From<ExitStatus> for i32 {
+    fn from(s: ExitStatus) -> i32 {
+        s.0
+    }
+}
+
+impl fmt::Display for ExitStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

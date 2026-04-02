@@ -1,7 +1,7 @@
 use std::os::unix::io::AsRawFd;
 
 use crate::ast::*;
-use crate::error::{ShellError, Span};
+use crate::error::{ExitStatus, ShellError, Span};
 use crate::eval::Shell;
 use crate::parser::Parser;
 use crate::sys;
@@ -16,33 +16,35 @@ impl Shell {
         _assigns: &[Assignment],
         redirs: &[Redir],
         span: Span,
-    ) -> crate::error::Result<Option<i32>> {
+    ) -> crate::error::Result<Option<ExitStatus>> {
         let status = match name {
-            ":" | "true" => Some(0),
-            "false" => Some(1),
+            ":" | "true" => Some(ExitStatus::SUCCESS),
+            "false" => Some(ExitStatus::FAILURE),
             "echo" => Some(self.builtin_echo(args)),
             "cd" => Some(self.builtin_cd(args)),
             "pwd" => match std::env::current_dir() {
                 Ok(p) => {
                     write_stdout(&format!("{}\n", p.display()));
-                    Some(0)
+                    Some(ExitStatus::SUCCESS)
                 }
                 Err(e) => {
                     eprintln!("pwd: {e}");
-                    Some(1)
+                    Some(ExitStatus::FAILURE)
                 }
             },
             "exit" => {
                 let code = args
                     .get(1)
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .map(ExitStatus)
                     .unwrap_or(self.exit_status);
                 return Err(ShellError::Exit(code));
             }
             "return" => {
                 let code = args
                     .get(1)
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .map(ExitStatus)
                     .unwrap_or(self.exit_status);
                 return Err(ShellError::Return(code));
             }
@@ -51,22 +53,22 @@ impl Shell {
                     match arg.parse::<usize>() {
                         Ok(0) => {
                             eprintln!("break: Illegal number: {arg}");
-                            return Err(ShellError::Exit(1));
+                            return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                         Ok(n) => {
                             if self.loop_depth == 0 {
-                                Some(0)
+                                Some(ExitStatus::SUCCESS)
                             } else {
                                 return Err(ShellError::Break(n.min(self.loop_depth)));
                             }
                         }
                         Err(_) => {
                             eprintln!("break: Illegal number: {arg}");
-                            return Err(ShellError::Exit(1));
+                            return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                     }
                 } else if self.loop_depth == 0 {
-                    Some(0)
+                    Some(ExitStatus::SUCCESS)
                 } else {
                     return Err(ShellError::Break(1));
                 }
@@ -76,22 +78,22 @@ impl Shell {
                     match arg.parse::<usize>() {
                         Ok(0) => {
                             eprintln!("continue: Illegal number: {arg}");
-                            return Err(ShellError::Exit(1));
+                            return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                         Ok(n) => {
                             if self.loop_depth == 0 {
-                                Some(0)
+                                Some(ExitStatus::SUCCESS)
                             } else {
                                 return Err(ShellError::Continue(n.min(self.loop_depth)));
                             }
                         }
                         Err(_) => {
                             eprintln!("continue: Illegal number: {arg}");
-                            return Err(ShellError::Exit(1));
+                            return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                     }
                 } else if self.loop_depth == 0 {
-                    Some(0)
+                    Some(ExitStatus::SUCCESS)
                 } else {
                     return Err(ShellError::Continue(1));
                 }
@@ -120,7 +122,7 @@ impl Shell {
         Ok(status)
     }
 
-    fn builtin_echo(&self, args: &[String]) -> i32 {
+    fn builtin_echo(&self, args: &[String]) -> ExitStatus {
         let mut i = 1;
         let mut newline = true;
         let mut escape = false;
@@ -153,10 +155,10 @@ impl Shell {
         unsafe {
             sys::write(1, text.as_ptr() as *const _, text.len());
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_cd(&mut self, args: &[String]) -> i32 {
+    fn builtin_cd(&mut self, args: &[String]) -> ExitStatus {
         let dir = if args.len() > 1 {
             args[1].as_str()
         } else {
@@ -164,7 +166,7 @@ impl Shell {
                 Some(h) => h,
                 None => {
                     eprintln!("cd: HOME not set");
-                    return 1;
+                    return ExitStatus::FAILURE;
                 }
             }
         };
@@ -174,22 +176,22 @@ impl Shell {
                 if let Ok(pwd) = std::env::current_dir() {
                     let _ = self.vars.set("PWD", &pwd.to_string_lossy());
                 }
-                0
+                ExitStatus::SUCCESS
             }
             Err(e) => {
                 eprintln!("cd: {dir}: {e}");
-                1
+                ExitStatus::FAILURE
             }
         }
     }
 
-    fn builtin_export(&mut self, args: &[String]) -> i32 {
+    fn builtin_export(&mut self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
             // Print all exported variables
             for (k, v) in self.vars.exported_env() {
                 write_stdout(&format!("export {k}=\"{v}\"\n"));
             }
-            return 0;
+            return ExitStatus::SUCCESS;
         }
 
         for arg in &args[1..] {
@@ -202,10 +204,10 @@ impl Shell {
                 self.vars.export(arg);
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_readonly(&mut self, args: &[String]) -> i32 {
+    fn builtin_readonly(&mut self, args: &[String]) -> ExitStatus {
         for arg in &args[1..] {
             if let Some(eq) = arg.find('=') {
                 let name = &arg[..eq];
@@ -216,11 +218,11 @@ impl Shell {
                 self.vars.set_readonly(arg);
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_unset(&mut self, args: &[String]) -> i32 {
-        let mut status = 0;
+    fn builtin_unset(&mut self, args: &[String]) -> ExitStatus {
+        let mut status = ExitStatus::SUCCESS;
         let mut unset_funcs = false;
         let mut i = 1;
 
@@ -241,15 +243,15 @@ impl Shell {
                 self.functions.remove(arg.as_str());
             } else if let Err(e) = self.vars.unset(arg) {
                 eprintln!("unset: {e}");
-                status = 1;
+                status = ExitStatus::FAILURE;
             }
         }
         status
     }
 
-    fn builtin_set(&mut self, args: &[String]) -> i32 {
+    fn builtin_set(&mut self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
-            return 0;
+            return ExitStatus::SUCCESS;
         }
 
         let mut i = 1;
@@ -259,7 +261,7 @@ impl Shell {
                 i += 1;
                 // Remaining args become positional parameters
                 self.vars.positional = args[i..].to_vec();
-                return 0;
+                return ExitStatus::SUCCESS;
             } else if arg.starts_with('-') || arg.starts_with('+') {
                 let enable = arg.starts_with('-');
                 for ch in arg[1..].chars() {
@@ -269,7 +271,7 @@ impl Shell {
                         'x' => self.opts.xtrace = enable,
                         _ => {
                             eprintln!("set: unknown option: -{ch}");
-                            return 1;
+                            return ExitStatus::FAILURE;
                         }
                     }
                 }
@@ -277,28 +279,28 @@ impl Shell {
             } else {
                 // Positional parameters
                 self.vars.positional = args[i..].to_vec();
-                return 0;
+                return ExitStatus::SUCCESS;
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_shift(&mut self, args: &[String]) -> i32 {
+    fn builtin_shift(&mut self, args: &[String]) -> ExitStatus {
         let n = args
             .get(1)
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
         if n > self.vars.positional.len() {
             eprintln!("shift: can't shift that many");
-            return 1;
+            return ExitStatus::FAILURE;
         }
         self.vars.positional = self.vars.positional[n..].to_vec();
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_eval(&mut self, args: &[String]) -> crate::error::Result<i32> {
+    fn builtin_eval(&mut self, args: &[String]) -> crate::error::Result<ExitStatus> {
         if args.len() <= 1 {
-            return Ok(0);
+            return Ok(ExitStatus::SUCCESS);
         }
         let script = args[1..].join(" ");
         // eval must propagate control flow (break, continue, return, exit)
@@ -308,10 +310,10 @@ impl Shell {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("epsh: {e}");
-                return Ok(2);
+                return Ok(ExitStatus::MISUSE);
             }
         };
-        let mut status = 0;
+        let mut status = ExitStatus::SUCCESS;
         for cmd in &program.commands {
             status = self.eval_command(cmd)?;
             self.exit_status = status;
@@ -319,10 +321,10 @@ impl Shell {
         Ok(status)
     }
 
-    fn builtin_dot(&mut self, args: &[String], _span: Span) -> crate::error::Result<i32> {
+    fn builtin_dot(&mut self, args: &[String], _span: Span) -> crate::error::Result<ExitStatus> {
         if args.len() <= 1 {
             eprintln!(".: filename argument required");
-            return Err(ShellError::Exit(2));
+            return Err(ShellError::Exit(ExitStatus::MISUSE));
         }
         let filename = &args[1];
         let content = match std::fs::read_to_string(filename) {
@@ -330,7 +332,7 @@ impl Shell {
             Err(e) => {
                 eprintln!(".: {filename}: {e}");
                 // . is a special builtin — file not found is fatal
-                return Err(ShellError::Exit(127));
+                return Err(ShellError::Exit(ExitStatus::NOT_FOUND));
             }
         };
         // dot runs in the current shell (not a subshell), and must
@@ -340,10 +342,10 @@ impl Shell {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("epsh: {e}");
-                return Ok(2);
+                return Ok(ExitStatus::MISUSE);
             }
         };
-        let mut status = 0;
+        let mut status = ExitStatus::SUCCESS;
         for cmd in &program.commands {
             status = self.eval_command(cmd)?;
             self.exit_status = status;
@@ -351,12 +353,12 @@ impl Shell {
         Ok(status)
     }
 
-    fn builtin_test(&self, args: &[String]) -> i32 {
+    fn builtin_test(&self, args: &[String]) -> ExitStatus {
         let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let args = if args[0] == "[" {
             if args.last() != Some(&"]") {
                 eprintln!("[: missing ]");
-                return 2;
+                return ExitStatus::MISUSE;
             }
             &args[1..args.len() - 1]
         } else {
@@ -365,7 +367,7 @@ impl Shell {
         test_eval(args)
     }
 
-    fn builtin_read(&mut self, args: &[String]) -> i32 {
+    fn builtin_read(&mut self, args: &[String]) -> ExitStatus {
         // Parse options
         let mut i = 1;
         let mut raw_mode = false;
@@ -425,7 +427,7 @@ impl Shell {
             for name in &var_names {
                 let _ = self.vars.set(name, "");
             }
-            return 1;
+            return ExitStatus::FAILURE;
         }
 
         // Split on IFS and assign to variables
@@ -472,10 +474,10 @@ impl Shell {
                 let _ = self.vars.set(name, value);
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_local(&mut self, args: &[String]) -> i32 {
+    fn builtin_local(&mut self, args: &[String]) -> ExitStatus {
         for arg in &args[1..] {
             if let Some(eq) = arg.find('=') {
                 let name = &arg[..eq];
@@ -486,7 +488,7 @@ impl Shell {
                 self.vars.make_local(arg);
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
     fn builtin_exec(
@@ -494,7 +496,7 @@ impl Shell {
         args: &[String],
         redirs: &[Redir],
         _span: Span,
-    ) -> crate::error::Result<i32> {
+    ) -> crate::error::Result<ExitStatus> {
         // Apply redirections to the shell itself (no save/restore)
         for redir in redirs {
             // Same setup but don't save
@@ -521,18 +523,18 @@ impl Shell {
 
         if args.len() <= 1 {
             // exec with only redirections — modify shell's fds
-            return Ok(0);
+            return Ok(ExitStatus::SUCCESS);
         }
 
         // exec with command — replace process
         let err = exec::execvp(&args[0], args);
         eprintln!("exec: {}: {err}", args[0]);
-        Ok(126)
+        Ok(ExitStatus::NOT_EXECUTABLE)
     }
 
-    fn builtin_command(&mut self, args: &[String], span: Span) -> crate::error::Result<i32> {
+    fn builtin_command(&mut self, args: &[String], span: Span) -> crate::error::Result<ExitStatus> {
         if args.len() <= 1 {
-            return Ok(0);
+            return Ok(ExitStatus::SUCCESS);
         }
         // Skip -v/-V flags
         let mut i = 1;
@@ -540,7 +542,7 @@ impl Shell {
             i += 1;
         }
         if i >= args.len() {
-            return Ok(0);
+            return Ok(ExitStatus::SUCCESS);
         }
         let new_args: Vec<String> = args[i..].to_vec();
 
@@ -552,8 +554,8 @@ impl Shell {
         }
     }
 
-    fn builtin_type(&self, args: &[String]) -> i32 {
-        let mut status = 0;
+    fn builtin_type(&self, args: &[String]) -> ExitStatus {
+        let mut status = ExitStatus::SUCCESS;
         for name in &args[1..] {
             if self.functions.contains_key(name.as_str()) {
                 write_stdout(&format!("{name} is a function\n"));
@@ -563,13 +565,13 @@ impl Shell {
                 write_stdout(&format!("{name} is {path}\n"));
             } else {
                 eprintln!("{name}: not found");
-                status = 1;
+                status = ExitStatus::FAILURE;
             }
         }
         status
     }
 
-    fn builtin_wait(&mut self, _args: &[String]) -> i32 {
+    fn builtin_wait(&mut self, _args: &[String]) -> ExitStatus {
         // Wait for all background children
         loop {
             let mut status = 0i32;
@@ -578,16 +580,16 @@ impl Shell {
                 break;
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_trap(&mut self, args: &[String]) -> i32 {
+    fn builtin_trap(&mut self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
             // Print current traps
             for (sig, action) in &self.traps {
                 write_stdout(&format!("trap -- '{}' {}\n", action, sig));
             }
-            return 0;
+            return ExitStatus::SUCCESS;
         }
         if args.len() == 2 {
             // trap '' SIG or trap - SIG
@@ -595,7 +597,7 @@ impl Shell {
                 // Reset all traps
                 self.traps.clear();
             }
-            return 0;
+            return ExitStatus::SUCCESS;
         }
         let action = &args[1];
         for sig_name in &args[2..] {
@@ -605,33 +607,33 @@ impl Shell {
                 self.traps.insert(sig_name.clone(), action.clone());
             }
         }
-        0
+        ExitStatus::SUCCESS
     }
 
-    fn builtin_umask(&self, args: &[String]) -> i32 {
+    fn builtin_umask(&self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
             let mask = unsafe { sys::umask(0) };
             unsafe {
                 sys::umask(mask);
             }
             write_stdout(&format!("{mask:04o}\n"));
-            return 0;
+            return ExitStatus::SUCCESS;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
             unsafe {
                 sys::umask(mask as libc::mode_t);
             }
-            0
+            ExitStatus::SUCCESS
         } else {
             eprintln!("umask: {}: invalid mask", args[1]);
-            1
+            ExitStatus::FAILURE
         }
     }
 
-    fn builtin_getopts(&mut self, args: &[String]) -> i32 {
+    fn builtin_getopts(&mut self, args: &[String]) -> ExitStatus {
         if args.len() < 3 {
             eprintln!("getopts: usage: getopts optstring name [arg ...]");
-            return 2;
+            return ExitStatus::MISUSE;
         }
         let optstring = &args[1];
         let name = &args[2];
@@ -649,13 +651,13 @@ impl Shell {
 
         if optind < 1 || optind > argv.len() {
             let _ = self.vars.set(name, "?");
-            return 1;
+            return ExitStatus::FAILURE;
         }
 
         let arg = &argv[optind - 1];
         if !arg.starts_with('-') || arg == "-" || arg == "--" {
             let _ = self.vars.set(name, "?");
-            return 1;
+            return ExitStatus::FAILURE;
         }
 
         let optchars: Vec<char> = optstring.chars().collect();
@@ -700,7 +702,7 @@ impl Shell {
                         eprintln!("getopts: option requires argument -- {opt}");
                         let _ = self.vars.set(name, "?");
                         let _ = self.vars.set("OPTIND", &(optind + 1).to_string());
-                        return 0;
+                        return ExitStatus::SUCCESS;
                     }
                 } else {
                     let _ = self.vars.unset("OPTARG");
@@ -711,7 +713,7 @@ impl Shell {
                         let _ = self.vars.set("_OPTPOS", &(optpos + 1).to_string());
                     }
                 }
-                0
+                ExitStatus::SUCCESS
             }
             None => {
                 eprintln!("getopts: illegal option -- {opt}");
@@ -722,15 +724,15 @@ impl Shell {
                 } else {
                     let _ = self.vars.set("_OPTPOS", &(optpos + 1).to_string());
                 }
-                0
+                ExitStatus::SUCCESS
             }
         }
     }
 
-    fn builtin_printf(&self, args: &[String]) -> i32 {
+    fn builtin_printf(&self, args: &[String]) -> ExitStatus {
         if args.len() < 2 {
             eprintln!("printf: usage: printf format [arguments]");
-            return 1;
+            return ExitStatus::FAILURE;
         }
 
         let format = &args[1];
@@ -893,7 +895,7 @@ impl Shell {
         }
 
         write_stdout(&out);
-        0
+        ExitStatus::SUCCESS
     }
 }
 
