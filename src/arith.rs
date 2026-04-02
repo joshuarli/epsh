@@ -37,6 +37,7 @@ pub fn eval_arith(
         vars,
         exit_status,
         shell_pid,
+        noeval: false,
     };
     let result = parser.parse_expr()?;
     if parser.pos < parser.tokens.len() {
@@ -305,6 +306,9 @@ struct ArithParser<'a> {
     vars: &'a mut Variables,
     exit_status: ExitStatus,
     shell_pid: u32,
+    /// When true, parse expressions but don't execute side effects (assignments).
+    /// Used for short-circuit evaluation of ternary and logical operators.
+    noeval: bool,
 }
 
 impl<'a> ArithParser<'a> {
@@ -337,7 +341,9 @@ impl<'a> ArithParser<'a> {
     }
 
     fn set_var(&mut self, name: &str, value: i64) {
-        let _ = self.vars.set(name, &value.to_string());
+        if !self.noeval {
+            let _ = self.vars.set(name, &value.to_string());
+        }
     }
 
     // ── Precedence climbing ──────────────────────────────────────
@@ -449,9 +455,14 @@ impl<'a> ArithParser<'a> {
         let cond = self.parse_or()?;
         if self.peek() == Some(&ArithToken::Question) {
             self.pos += 1;
+            // Short-circuit: only evaluate the taken branch (dash: noeval | !a / noeval | !!a)
+            let saved = self.noeval;
+            self.noeval = saved || cond == 0; // noeval then-branch if cond is false
             let then_val = self.parse_expr()?;
             self.expect(&ArithToken::Colon)?;
+            self.noeval = saved || cond != 0; // noeval else-branch if cond is true
             let else_val = self.parse_expr()?;
+            self.noeval = saved;
             Ok(if cond != 0 { then_val } else { else_val })
         } else {
             Ok(cond)
@@ -462,7 +473,11 @@ impl<'a> ArithParser<'a> {
         let mut left = self.parse_and()?;
         while self.peek() == Some(&ArithToken::Or) {
             self.pos += 1;
+            // Short-circuit: if left is true, don't evaluate right side effects
+            let saved = self.noeval;
+            self.noeval = saved || left != 0;
             let right = self.parse_and()?;
+            self.noeval = saved;
             left = if left != 0 || right != 0 { 1 } else { 0 };
         }
         Ok(left)
@@ -472,7 +487,11 @@ impl<'a> ArithParser<'a> {
         let mut left = self.parse_bitor()?;
         while self.peek() == Some(&ArithToken::And) {
             self.pos += 1;
+            // Short-circuit: if left is false, don't evaluate right side effects
+            let saved = self.noeval;
+            self.noeval = saved || left == 0;
             let right = self.parse_bitor()?;
+            self.noeval = saved;
             left = if left != 0 && right != 0 { 1 } else { 0 };
         }
         Ok(left)
