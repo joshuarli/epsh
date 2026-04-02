@@ -471,9 +471,14 @@ impl Lexer {
                             }
                         }
                         '\\' => {
-                            // Unquoted backslash
+                            // Unquoted backslash — preserve \ for glob chars so
+                            // fnmatch can distinguish \? (literal) from ? (glob).
+                            // Quote removal strips these during normal expansion.
                             had_quoting = true; self.advance(); // consume backslash
                             if let Some(escaped) = self.advance() {
+                                if matches!(escaped, '*' | '?' | '[' | ']') {
+                                    literal.push('\\');
+                                }
                                 literal.push(escaped);
                             }
                         }

@@ -38,13 +38,14 @@ pub fn expand_word_to_fields(
         if glob::has_glob_chars(&field) {
             let matches = glob::glob(&field);
             if matches.is_empty() {
-                // No matches: keep the pattern literal (POSIX behavior)
-                result.push(field);
+                // No matches: keep the pattern literal, with quote removal
+                result.push(remove_glob_escapes(&field));
             } else {
                 result.extend(matches);
             }
         } else {
-            result.push(field);
+            // Quote removal: strip backslash-escapes of glob chars
+            result.push(remove_glob_escapes(&field));
         }
     }
 
@@ -639,6 +640,26 @@ fn field_split(fragments: &[ExpandedWord], ifs: &str) -> Vec<String> {
 }
 
 /// Remove smallest/largest suffix matching pattern.
+/// Remove backslash escapes before glob metacharacters.
+/// These were preserved by the lexer for fnmatch/glob, but need stripping
+/// for normal word expansion (POSIX quote removal).
+fn remove_glob_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '*' | '?' | '[' | ']') {
+            // Skip the backslash, keep the char
+            i += 1;
+            result.push(chars[i]);
+        } else {
+            result.push(chars[i]);
+        }
+        i += 1;
+    }
+    result
+}
+
 fn trim_suffix(value: &str, pattern: &str, greedy: bool) -> String {
     let chars: Vec<char> = value.chars().collect();
     if greedy {
