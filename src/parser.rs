@@ -1039,8 +1039,18 @@ fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
             '\\' => {
                 i += 1;
                 if i < chars.len() {
-                    parts.push(WordPart::Literal(chars[i].to_string()));
-                    i += 1;
+                    if chars[i] == '\n' {
+                        // \<newline> in heredoc body = line continuation (skip both)
+                        i += 1;
+                    } else if matches!(chars[i], '$' | '`' | '"' | '\\') {
+                        // In double-quote-like context, these are special escapes
+                        parts.push(WordPart::Literal(chars[i].to_string()));
+                        i += 1;
+                    } else {
+                        // Other \X — preserve the backslash
+                        parts.push(WordPart::Literal(format!("\\{}", chars[i])));
+                        i += 1;
+                    }
                 }
             }
             '~' if parts.is_empty() => {

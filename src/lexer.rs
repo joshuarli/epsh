@@ -1442,7 +1442,6 @@ impl Lexer {
     ) -> std::result::Result<String, ShellError> {
         let mut body = String::new();
         loop {
-            // Read a line (raw — no backslash-newline eating in heredoc bodies)
             let mut line = String::new();
 
             // Strip leading tabs if <<-
@@ -1469,6 +1468,36 @@ impl Lexer {
                     Some(c) => {
                         line.push(c);
                     }
+                }
+            }
+
+            // For unquoted heredocs, \<newline> is continuation — if line ends
+            // with \, strip the backslash and join with the next physical line.
+            // The joined result is checked as one logical line for delimiter matching.
+            if !heredoc.quoted && line.ends_with('\\') {
+                line.pop(); // remove trailing backslash
+                // Don't break — keep accumulating into `line` by reading another line
+                // Strip leading tabs again if <<-
+                if heredoc.strip_tabs {
+                    while self.peek_raw() == Some('\t') {
+                        self.advance_raw();
+                    }
+                }
+                // Read the continuation into the same line buffer
+                loop {
+                    match self.advance_raw() {
+                        None => break,
+                        Some('\n') => break,
+                        Some(c) => line.push(c),
+                    }
+                }
+                // Check again for continuation (could be multi-line)
+                if !heredoc.quoted && line.ends_with('\\') {
+                    // Recursive continuation — handle by looping
+                    // For simplicity, just store and continue the outer loop
+                    line.pop();
+                    body.push_str(&line);
+                    continue;
                 }
             }
 
