@@ -6,7 +6,9 @@ Build a non-interactive, embeddable POSIX shell in stdlib-only Rust, targeting u
 - **dash** (`~/d/dash-0.5.11+git20200708+dd9ef66`) — minimal, fast, well-tested POSIX shell (~12k LOC). Classic C design with union-tagged AST, setjmp/longjmp errors, embedded control chars in words, hand-rolled hash tables.
 - **posh** (`~/d/posh-0.14.3`) — portable POSIX shell (~17k LOC, pdksh lineage). Notable for arena allocation, environment stacking with per-scope jbufs, SubType stack for nested expansion, explicit field-splitting state machine (IFS_WORD/IFS_WS/IFS_NWS), and migration to tree-based symbol lookup.
 
-We take the best ideas from both and leverage Rust's type system for cleaner, safer code.
+- **mrsh** (`~/d/mrsh`) — modern, clean POSIX shell (~12k LOC). Library-first design (libmrsh + binary). Explicit type-safe AST (no union tags), position tracking on every node, word-list nesting for quoting, split-fields metadata flag, task-based control flow (no setjmp), explicit context passing (no globals), modular builtins (one file each), optional job control.
+
+We take the best ideas from all three and leverage Rust's type system for cleaner, safer code.
 
 ## What We Keep from Dash
 
@@ -79,54 +81,67 @@ src/
 
 ### Key Design Decisions
 
-**1. AST as Rust enums** (vs dash's `union node` + type tag)
+**1. AST with source positions** (inspired by mrsh) — every node carries a `Span` for error reporting:
 ```rust
+struct Span { offset: usize, line: u32, col: u32 }
+
 enum Command {
-    Simple { assigns: Vec<Assignment>, args: Vec<Word>, redirs: Vec<Redir> },
-    Pipeline { commands: Vec<Command>, bang: bool },
+    Simple { assigns: Vec<Assignment>, args: Vec<Word>, redirs: Vec<Redir>, span: Span },
+    Pipeline { commands: Vec<Command>, bang: bool, span: Span },
     And(Box<Command>, Box<Command>),
     Or(Box<Command>, Box<Command>),
     Semi(Box<Command>, Box<Command>),
-    Subshell { body: Box<Command>, redirs: Vec<Redir> },
-    If { cond: Box<Command>, then_part: Box<Command>, else_part: Option<Box<Command>> },
-    While { cond: Box<Command>, body: Box<Command> },
-    Until { cond: Box<Command>, body: Box<Command> },
-    For { var: String, words: Option<Vec<Word>>, body: Box<Command> },
-    Case { word: Word, arms: Vec<CaseArm> },
-    FuncDef { name: String, body: Box<Command> },
+    Subshell { body: Box<Command>, redirs: Vec<Redir>, span: Span },
+    If { cond: Box<Command>, then_part: Box<Command>, else_part: Option<Box<Command>>, span: Span },
+    While { cond: Box<Command>, body: Box<Command>, span: Span },
+    Until { cond: Box<Command>, body: Box<Command>, span: Span },
+    For { var: String, words: Option<Vec<Word>>, body: Box<Command>, span: Span },
+    Case { word: Word, arms: Vec<CaseArm>, span: Span },
+    FuncDef { name: String, body: Box<Command>, span: Span },
     Not(Box<Command>),
     Background { cmd: Box<Command>, redirs: Vec<Redir> },
 }
 ```
 
-**2. Word representation** — instead of dash's embedded control characters (CTLVAR, CTLBACKQ, etc.), use a typed representation:
+**2. Word representation** — word-list nesting (inspired by mrsh) instead of dash's embedded control characters:
 ```rust
+// A Word is a list of parts that concatenate to form a single shell word
+struct Word { parts: Vec<WordPart>, span: Span }
+
 enum WordPart {
     Literal(String),
     SingleQuoted(String),
-    DoubleQuoted(Vec<WordPart>),
-    Param(ParamExpr),         // ${var}, ${var:-default}, ${#var}, etc.
-    CmdSubst(Box<Command>),   // $(cmd)
-    Backtick(Box<Command>),   // `cmd`
-    Arith(Vec<WordPart>),     // $((expr))
-    Tilde(String),            // ~user
-    Glob(String),             // deferred to expansion phase
+    DoubleQuoted(Vec<WordPart>),  // parts inside "..."
+    Param(ParamExpr),             // ${var}, ${var:-default}, ${#var}, etc.
+    CmdSubst(Box<Command>),       // $(cmd)
+    Backtick(Box<Command>),       // `cmd`
+    Arith(Vec<WordPart>),         // $((expr))
+    Tilde(String),                // ~user
+}
+// Glob patterns are detected during expansion, not at parse time
+```
+
+**3. Error handling** — `Result<T, ShellError>` instead of setjmp/longjmp (matching mrsh's approach). Errors carry source position for good diagnostics:
+```rust
+enum ShellError {
+    Exit(i32),                          // exit N
+    Return(i32),                        // return N
+    Break(usize),                       // break N
+    Continue(usize),                    // continue N
+    CommandNotFound(String),
+    Syntax { msg: String, span: Span }, // with position
+    Io(std::io::Error),
 }
 ```
 
-**3. Error handling** — `Result<T, ShellError>` instead of setjmp/longjmp. Use an enum for control flow:
+**Split-fields tracking** (adopted from mrsh) — expanded words carry metadata about whether field splitting applies:
 ```rust
-enum ShellError {
-    ExitShell(i32),           // exit N
-    Return(i32),              // return N
-    Break(usize),             // break N
-    Continue(usize),          // continue N
-    CommandNotFound(String),
-    SyntaxError(String, usize), // message + line number
-    IoError(std::io::Error),
-    // ...
+struct ExpandedWord {
+    value: String,
+    split_fields: bool,  // true for unquoted $var, $(cmd) — triggers IFS splitting
 }
 ```
+This elegantly handles the difference between `"$var"` (no split) and `$var` (split).
 
 **4. Variable storage** — `HashMap<String, Var>` instead of dash's hand-rolled hash table:
 ```rust
