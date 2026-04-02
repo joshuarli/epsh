@@ -148,7 +148,7 @@ impl Lexer {
     }
 
     /// Peek at the next character without consuming it (raw, no backslash-newline eating).
-    fn peek_raw(&self) -> Option<char> {
+    pub(crate) fn peek_raw(&self) -> Option<char> {
         self.src.get(self.pos).copied()
     }
 
@@ -170,7 +170,7 @@ impl Lexer {
     }
 
     /// Consume and return the next character, updating position tracking (raw).
-    fn advance_raw(&mut self) -> Option<char> {
+    pub(crate) fn advance_raw(&mut self) -> Option<char> {
         let ch = self.src.get(self.pos).copied()?;
         self.pos += 1;
         if ch == '\n' {

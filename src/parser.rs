@@ -18,12 +18,15 @@ use crate::lexer::{Lexer, PendingHereDoc, Token, parts_have_quoting, parts_to_te
 /// ```
 pub struct Parser {
     lexer: Lexer,
+    /// Heredoc bodies read at newlines, waiting to be patched into the AST.
+    heredoc_bodies: Vec<(String, bool)>,
 }
 
 impl Parser {
     pub fn new(source: &str) -> Self {
         Parser {
             lexer: Lexer::new(source),
+            heredoc_bodies: Vec::new(),
         }
     }
 
@@ -62,7 +65,18 @@ impl Parser {
     fn skip_newlines(&mut self) -> Result<(), ShellError> {
         loop {
             let (tok, span) = self.next()?;
-            if tok != Token::Newline {
+            if tok == Token::Newline {
+                // Dash reads heredoc bodies at newlines (parseheredoc in readtoken).
+                // We store a dummy command for patching if there are pending heredocs.
+                if !self.lexer.pending_heredocs.is_empty() {
+                    let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+                    for heredoc in &pending {
+                        let body = self.lexer.read_heredoc_body(heredoc)?;
+                        // Store bodies for later patching
+                        self.heredoc_bodies.push((body, heredoc.quoted));
+                    }
+                }
+            } else {
                 self.lexer.push_back(tok, span);
                 return Ok(());
             }
@@ -161,6 +175,7 @@ impl Parser {
     }
 
     fn read_pending_heredocs(&mut self, cmd: &mut Command) -> Result<(), ShellError> {
+        // First try: read from lexer directly (bodies haven't been consumed by newline yet)
         if !self.lexer.pending_heredocs.is_empty() {
             let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
             let mut bodies = Vec::new();
@@ -170,12 +185,16 @@ impl Parser {
             }
             Self::patch_heredocs(cmd, &bodies);
         }
+        // Second: apply any bodies that were read at newlines (via skip_newlines)
+        if !self.heredoc_bodies.is_empty() {
+            let bodies: Vec<(String, bool)> = self.heredoc_bodies.drain(..).collect();
+            Self::patch_heredocs(cmd, &bodies);
+        }
         Ok(())
     }
 
     fn parse_command_list(&mut self, allow_newline_sep: bool) -> Result<Command, ShellError> {
         let mut cmd = self.parse_and_or()?;
-        self.read_pending_heredocs(&mut cmd)?;
 
         loop {
             let (tok, _span) = self.peek()?;
@@ -191,6 +210,14 @@ impl Parser {
                 }
                 Token::Newline if allow_newline_sep => {
                     self.next()?;
+                    // Read heredoc bodies that follow this newline
+                    if !self.lexer.pending_heredocs.is_empty() {
+                        let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+                        for heredoc in &pending {
+                            let body = self.lexer.read_heredoc_body(heredoc)?;
+                            self.heredoc_bodies.push((body, heredoc.quoted));
+                        }
+                    }
                     self.skip_newlines()?;
                     let (next_tok, _) = self.peek()?;
                     if is_command_start(&next_tok) {
