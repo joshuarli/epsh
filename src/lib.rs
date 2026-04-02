@@ -1,10 +1,13 @@
 pub mod arith;
 pub mod ast;
+mod builtins;
 pub mod error;
 pub mod eval;
 pub mod expand;
 pub mod glob;
 pub mod lexer;
 pub mod parser;
+mod redirect;
 mod sys;
+mod test_cmd;
 pub mod var;
