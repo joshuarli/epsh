@@ -140,17 +140,7 @@ impl Parser {
                 break;
             }
             let mut cmd = self.parse_complete_command()?;
-            // Read pending here-document bodies (they follow the command line)
-            if !self.lexer.pending_heredocs.is_empty() {
-                let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
-                let mut bodies = Vec::new();
-                for heredoc in &pending {
-                    let body = self.lexer.read_heredoc_body(heredoc)?;
-                    bodies.push((body, heredoc.quoted));
-                }
-                // Patch the heredoc redirection nodes with their bodies
-                Self::patch_heredocs(&mut cmd, &bodies);
-            }
+            self.read_pending_heredocs(&mut cmd)?;
             commands.push(cmd);
             self.skip_newlines()?;
         }
@@ -170,8 +160,22 @@ impl Parser {
         self.parse_command_list(true)
     }
 
+    fn read_pending_heredocs(&mut self, cmd: &mut Command) -> Result<(), ShellError> {
+        if !self.lexer.pending_heredocs.is_empty() {
+            let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+            let mut bodies = Vec::new();
+            for heredoc in &pending {
+                let body = self.lexer.read_heredoc_body(heredoc)?;
+                bodies.push((body, heredoc.quoted));
+            }
+            Self::patch_heredocs(cmd, &bodies);
+        }
+        Ok(())
+    }
+
     fn parse_command_list(&mut self, allow_newline_sep: bool) -> Result<Command, ShellError> {
         let mut cmd = self.parse_and_or()?;
+        self.read_pending_heredocs(&mut cmd)?;
 
         loop {
             let (tok, _span) = self.peek()?;
