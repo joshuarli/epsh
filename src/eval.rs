@@ -754,6 +754,7 @@ impl Shell {
                     Err(ShellError::Exit(n)) => n,
                     Err(_) => ExitStatus::FAILURE,
                 };
+                self.run_exit_trap();
                 sys::exit_child(status.0);
             }
 
