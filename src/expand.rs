@@ -16,6 +16,10 @@ pub trait ShellExpand {
     fn pid(&self) -> u32;
     fn cwd(&self) -> &Path;
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String>;
+    /// Active shell option flags for `$-` (e.g. "eux").
+    fn shell_flags(&self) -> String;
+    /// Last background PID for `$!`, if any.
+    fn last_bg_pid(&self) -> Option<u32>;
 }
 
 /// An expanded word fragment with metadata for field splitting.
@@ -355,7 +359,9 @@ fn expand_param_to_fragments(
     let raw_value = if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
-        sh.vars().get_special(name, exit_status, pid)
+        let flags = sh.shell_flags();
+        let bg_pid = sh.last_bg_pid();
+        sh.vars().get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
         sh.vars().get(name).map(String::from)
     };
@@ -482,7 +488,9 @@ fn expand_param(
     let raw_value = if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
-        sh.vars().get_special(name, exit_status, pid)
+        let flags = sh.shell_flags();
+        let bg_pid = sh.last_bg_pid();
+        sh.vars().get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
         sh.vars().get(name).map(String::from)
     };
@@ -783,6 +791,8 @@ mod tests {
         fn exit_status(&self) -> ExitStatus { self.status }
         fn pid(&self) -> u32 { 1 }
         fn cwd(&self) -> &Path { Path::new("/") }
+        fn shell_flags(&self) -> String { String::new() }
+        fn last_bg_pid(&self) -> Option<u32> { None }
         fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {
             Ok(String::new())
         }

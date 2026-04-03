@@ -287,7 +287,7 @@ fn variables_api() {
     vars.pop_scope();
 
     // special
-    let _: Option<String> = vars.get_special("?", error::ExitStatus::SUCCESS, 1);
+    let _: Option<String> = vars.get_special("?", error::ExitStatus::SUCCESS, 1, "", None);
     let _: &str = vars.ifs();
     let _: Vec<(String, String)> = vars.exported_env();
 

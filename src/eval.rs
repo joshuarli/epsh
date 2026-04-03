@@ -114,6 +114,8 @@ pub struct Shell {
     /// Optional callback that replaces eval_external for spawning processes.
     /// Lets embedders control process creation (job control, sandboxing, etc.).
     external_handler: Option<ExternalHandler>,
+    /// PID of the last background command ($!).
+    last_bg_pid: Option<u32>,
 }
 
 /// Shell option flags (`set -e`, `set -u`, etc.).
@@ -131,12 +133,26 @@ pub struct ShellOpts {
     pub interactive: bool,
 }
 
+impl ShellOpts {
+    /// Return the POSIX `$-` flags string (e.g. "eux").
+    pub fn flags_string(&self) -> String {
+        let mut s = String::new();
+        if self.errexit { s.push('e'); }
+        if self.nounset { s.push('u'); }
+        if self.xtrace { s.push('x'); }
+        if self.interactive { s.push('i'); }
+        s
+    }
+}
+
 impl expand::ShellExpand for Shell {
     fn vars(&self) -> &Variables { &self.vars }
     fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
     fn exit_status(&self) -> ExitStatus { self.exit_status }
     fn pid(&self) -> u32 { self.pid }
     fn cwd(&self) -> &Path { &self.cwd }
+    fn shell_flags(&self) -> String { self.opts.flags_string() }
+    fn last_bg_pid(&self) -> Option<u32> { self.last_bg_pid }
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
         self.command_subst(cmd)
     }
@@ -231,6 +247,7 @@ impl ShellBuilder {
             child_pids: Vec::new(),
             timeout: self.timeout.map(|d| std::time::Instant::now() + d),
             external_handler: self.external_handler,
+            last_bg_pid: None,
         }
     }
 }
@@ -267,6 +284,7 @@ impl Shell {
             child_pids: Vec::new(),
             timeout: None,
             external_handler: None,
+            last_bg_pid: None,
         }
     }
 
@@ -1286,6 +1304,7 @@ impl Shell {
             }
 
             self.child_pids.push(pid);
+            self.last_bg_pid = Some(pid as u32);
             // Don't wait — background process
             Ok(ExitStatus::SUCCESS)
         }

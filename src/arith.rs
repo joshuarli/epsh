@@ -339,7 +339,7 @@ impl<'a> ArithParser<'a> {
         }
         // Slow path: special params ($?, $$, $#) and non-cached vars
         self.vars
-            .get_special(name, self.exit_status, self.shell_pid)
+            .get_special(name, self.exit_status, self.shell_pid, "", None)
             .or_else(|| self.vars.get(name).map(String::from))
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0)

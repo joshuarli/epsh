@@ -231,14 +231,21 @@ impl Variables {
     }
 
     /// Get a special parameter value ($?, $$, $#, $@, $*, $!, $-, $0, $1...).
-    pub fn get_special(&self, name: &str, exit_status: ExitStatus, shell_pid: u32) -> Option<String> {
+    pub fn get_special(
+        &self,
+        name: &str,
+        exit_status: ExitStatus,
+        shell_pid: u32,
+        shell_flags: &str,
+        last_bg_pid: Option<u32>,
+    ) -> Option<String> {
         match name {
             "?" => Some(exit_status.code().to_string()),
             "$" => Some(shell_pid.to_string()),
             "#" => Some(self.positional.len().to_string()),
             "0" => Some(self.arg0.clone()),
-            "-" => Some(String::new()), // TODO: shell option flags
-            "!" => None,                // TODO: last background pid
+            "-" => Some(shell_flags.to_string()),
+            "!" => last_bg_pid.map(|p| p.to_string()),
             "@" | "*" => {
                 // These need special handling in expansion (IFS joining for *, separate fields for @)
                 Some(self.positional.join(" "))
@@ -328,17 +335,17 @@ mod tests {
     fn positional_params() {
         let mut vars = Variables::new();
         vars.positional = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(vars.get_special("#", ExitStatus::SUCCESS, 1), Some("3".into()));
-        assert_eq!(vars.get_special("1", ExitStatus::SUCCESS, 1), Some("a".into()));
-        assert_eq!(vars.get_special("3", ExitStatus::SUCCESS, 1), Some("c".into()));
-        assert_eq!(vars.get_special("4", ExitStatus::SUCCESS, 1), None);
+        assert_eq!(vars.get_special("#", ExitStatus::SUCCESS, 1, "", None), Some("3".into()));
+        assert_eq!(vars.get_special("1", ExitStatus::SUCCESS, 1, "", None), Some("a".into()));
+        assert_eq!(vars.get_special("3", ExitStatus::SUCCESS, 1, "", None), Some("c".into()));
+        assert_eq!(vars.get_special("4", ExitStatus::SUCCESS, 1, "", None), None);
     }
 
     #[test]
     fn special_params() {
         let vars = Variables::new();
-        assert_eq!(vars.get_special("?", ExitStatus::from(42), 1234), Some("42".into()));
-        assert_eq!(vars.get_special("$", ExitStatus::SUCCESS, 1234), Some("1234".into()));
+        assert_eq!(vars.get_special("?", ExitStatus::from(42), 1234, "", None), Some("42".into()));
+        assert_eq!(vars.get_special("$", ExitStatus::SUCCESS, 1234, "", None), Some("1234".into()));
     }
 
     #[test]
