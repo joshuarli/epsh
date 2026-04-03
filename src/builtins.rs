@@ -998,7 +998,7 @@ fn unescape_echo(s: &str) -> String {
 }
 
 /// exec family helpers
-mod exec {
+pub(crate) mod exec {
     use std::ffi::CString;
 
     pub fn execvp(cmd: &str, args: &[String]) -> std::io::Error {

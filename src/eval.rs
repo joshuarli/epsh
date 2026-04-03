@@ -38,6 +38,9 @@ pub struct Shell {
     /// True when executing inside a forked child (pipeline stage, command subst).
     /// Subshells skip the extra fork to avoid pipe fd leaks.
     pub(crate) in_forked_child: bool,
+    /// True when the current eval context will exit after the command completes.
+    /// Allows eval_external to exec directly instead of fork+exec (dash's EV_EXIT).
+    pub(crate) ev_exit: bool,
     /// Optional cancellation flag. When set to true, the shell aborts execution.
     cancel: Option<Arc<AtomicBool>>,
     /// Optional stdout sink. When set, builtin output goes here instead of fd 1.
@@ -90,6 +93,7 @@ impl Shell {
             traps: HashMap::new(),
             tested: false,
             in_forked_child: false,
+            ev_exit: false,
             cancel: None,
             stdout_sink: None,
             stderr_sink: None,
@@ -348,6 +352,11 @@ impl Shell {
     }
 
     fn eval_command_inner(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
+        // ev_exit only applies to the final simple command in an exit context.
+        // Clear it for compound commands so nested commands don't exec-direct.
+        if !matches!(cmd, Command::Simple { .. }) {
+            self.ev_exit = false;
+        }
         match cmd {
             Command::Simple {
                 assigns,
@@ -671,6 +680,7 @@ impl Shell {
             if let Some(status) = self.try_builtin(cmd_name, &expanded_args, assigns, &[], span)? {
                 Ok(status)
             } else if let Some(func_body) = self.functions.get(cmd_name).cloned() {
+                self.ev_exit = false; // function body may have multiple commands
                 self.eval_function(&func_body, &expanded_args, assigns, &[], span)
             } else {
                 self.eval_external(&expanded_args, assigns, &[], span)
@@ -733,6 +743,33 @@ impl Shell {
     ) -> crate::error::Result<ExitStatus> {
         self.check_cancel()?;
         let saved = self.setup_redirections(redirs)?;
+
+        // When ev_exit is set (pipeline child about to _exit), exec directly
+        // instead of fork+exec. Mirrors dash's shellexec fast-path.
+        if self.ev_exit {
+            unsafe {
+                for (k, v) in self.vars.exported_env() {
+                    std::env::set_var(&k, &v);
+                }
+                for assign in assigns {
+                    if let Ok(value) = self.expand_string(&assign.value) {
+                        std::env::set_var(&assign.name, &value);
+                    }
+                }
+                let _ = std::env::set_current_dir(&self.cwd);
+            }
+            let err = crate::builtins::exec::execvp(&args[0], args);
+            self.restore_redirections(saved);
+            if err.kind() == std::io::ErrorKind::NotFound {
+                self.err_msg(&format!("{}: not found", args[0]));
+                return Ok(ExitStatus::NOT_FOUND);
+            } else if err.kind() == std::io::ErrorKind::PermissionDenied {
+                self.err_msg(&format!("{}: permission denied", args[0]));
+                return Ok(ExitStatus::NOT_EXECUTABLE);
+            } else {
+                return Err(ShellError::Io(err));
+            }
+        }
 
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
@@ -910,7 +947,9 @@ impl Shell {
                         sys::close(write_fd);
                     }
 
-                    // Execute command
+                    // Mark this as exit context — eval_external can exec
+                    // directly instead of fork+exec (dash's EV_EXIT).
+                    self.ev_exit = true;
                     let status = match self.eval_command(cmd) {
                         Ok(s) => s,
                         Err(ShellError::Exit(n)) => n,
