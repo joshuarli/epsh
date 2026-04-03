@@ -403,28 +403,39 @@ impl Shell {
             return Ok(ExitStatus::from_wait(status));
         }
 
-        // Poll with WNOHANG, checking cancel/timeout between iterations
-        loop {
+        // Spawn a thread to do blocking waitpid; check cancel while waiting.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG | wuntraced) };
-            if ret > 0 {
-                if libc::WIFSTOPPED(status) {
-                    return Err(ShellError::Stopped { pid, pgid });
+            unsafe { sys::waitpid(pid, &mut status, wuntraced); }
+            let _ = tx.send(status);
+        });
+        loop {
+            // Check for result with a short timeout to allow cancel checks
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(status) => {
+                    if libc::WIFSTOPPED(status) {
+                        return Err(ShellError::Stopped { pid, pgid });
+                    }
+                    self.child_pids.retain(|&p| p != pid);
+                    return Ok(ExitStatus::from_wait(status));
                 }
-                self.child_pids.retain(|&p| p != pid);
-                return Ok(ExitStatus::from_wait(status));
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.child_pids.retain(|&p| p != pid);
+                    return Ok(ExitStatus::FAILURE);
+                }
             }
             if let Err(e) = self.check_cancel() {
                 // Cancel or timeout — kill and reap
                 // SAFETY: pid is a valid child PID; negated for process group kill. SIGKILL is always valid.
                 unsafe { libc::kill(-pid, libc::SIGKILL); }
-                // SAFETY: pid is a valid child PID; reaping after kill.
-                unsafe { sys::waitpid(pid, &mut status, 0); }
+                // The thread will complete waitpid and send the status; just drain it
+                let _ = rx.recv();
                 self.child_pids.retain(|&p| p != pid);
                 return Err(e);
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
@@ -1071,23 +1082,31 @@ impl Shell {
                     handles.push(spawn_relay(stderr, self.stderr_sink.clone().unwrap()));
                 }
 
-                // Cancel-aware wait using try_wait
+                // Cancel-aware wait: spawn thread for blocking wait, check cancel in loop
                 let wait_result = if self.cancel.is_some() || self.timeout.is_some() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(child.wait());
+                    });
                     loop {
-                        match child.try_wait() {
-                            Ok(Some(status)) => break Ok(status),
-                            Ok(None) => {}
-                            Err(e) => break Err(e),
+                        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                            Ok(result) => break result,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                break Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other, "wait thread panicked"));
+                            }
                         }
                         if let Err(e) = self.check_cancel() {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            // Kill via PID since child was moved to the thread
+                            // SAFETY: child_id is a valid PID from the spawned process.
+                            unsafe { libc::kill(child_id, libc::SIGKILL); }
+                            let _ = rx.recv(); // wait for the thread to finish
                             self.child_pids.retain(|&p| p != child_id);
                             for h in handles { let _ = h.join(); }
                             self.restore_redirections(saved);
                             return Err(e);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                 } else {
                     child.wait()
