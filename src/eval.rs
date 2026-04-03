@@ -948,6 +948,9 @@ impl Shell {
 
         let cmd_name = &expanded_args[0];
 
+        // exec is special: its redirections are permanent (no save/restore)
+        let is_exec = cmd_name == "exec";
+
         // Setup redirections before executing (applies to builtins, functions, externals)
         let saved_fds = self.setup_redirections(redirs)?;
 
@@ -970,7 +973,17 @@ impl Shell {
                 self.eval_external(&expanded_args, assigns, &[], span)
             };
 
-        self.restore_redirections(saved_fds);
+        if is_exec {
+            // exec redirections are permanent — close saved copies instead of restoring
+            for s in saved_fds {
+                if let Some(copy) = s.saved_copy {
+                    // SAFETY: copy is a valid fd from fcntl_dupfd_cloexec.
+                    unsafe { sys::close(copy); }
+                }
+            }
+        } else {
+            self.restore_redirections(saved_fds);
+        }
         result
     }
 

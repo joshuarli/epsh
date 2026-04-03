@@ -1,5 +1,3 @@
-use std::os::unix::io::AsRawFd;
-
 use crate::ast::*;
 use crate::error::{ExitStatus, ShellError, Span};
 use crate::eval::Shell;
@@ -497,37 +495,11 @@ impl Shell {
     fn builtin_exec(
         &mut self,
         args: &[String],
-        redirs: &[Redir],
+        _redirs: &[Redir],
         _span: Span,
     ) -> crate::error::Result<ExitStatus> {
-        // Apply redirections to the shell itself (no save/restore)
-        for redir in redirs {
-            // Same setup but don't save
-            match &redir.kind {
-                RedirKind::Input(word) => {
-                    let filename = self.expand_string(word)?;
-                    let file = std::fs::File::open(&filename)?;
-                    // SAFETY: file fd is valid from File::open; redir.fd is the redirect target.
-                    unsafe {
-                        sys::dup2(file.as_raw_fd(), redir.fd);
-                    }
-                    std::mem::forget(file);
-                }
-                RedirKind::Output(word) | RedirKind::Clobber(word) => {
-                    let filename = self.expand_string(word)?;
-                    let file = std::fs::File::create(&filename)?;
-                    // SAFETY: file fd is valid from File::create; redir.fd is the redirect target.
-                    unsafe {
-                        sys::dup2(file.as_raw_fd(), redir.fd);
-                    }
-                    std::mem::forget(file);
-                }
-                _ => {} // TODO: other redirect types for exec
-            }
-        }
-
+        // Redirections are applied permanently by eval_simple (is_exec flag).
         if args.len() <= 1 {
-            // exec with only redirections — modify shell's fds
             return Ok(ExitStatus::SUCCESS);
         }
 

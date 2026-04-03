@@ -1035,3 +1035,64 @@ mod kill_builtin {
         assert_output("command -v kill", "kill\n");
     }
 }
+
+mod exec_redirects {
+    use super::*;
+
+    #[test]
+    fn exec_output_redirect() {
+        // After exec > file, output goes to the file, not terminal
+        let tmp = format!("/tmp/epsh_test_exec_out_{}", std::process::id());
+        let _ = std::fs::remove_file(&tmp);
+        let (stdout, _, code) = run(
+            &format!("exec > {tmp}; echo hello")
+        );
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "");
+        let contents = std::fs::read_to_string(&tmp).unwrap();
+        assert_eq!(contents, "hello\n");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn exec_append_redirect() {
+        let tmp = format!("/tmp/epsh_test_exec_app_{}", std::process::id());
+        let _ = std::fs::remove_file(&tmp);
+        let (_, _, code) = run(
+            &format!("echo first > {tmp}; exec >> {tmp}; echo second")
+        );
+        assert_eq!(code, 0);
+        let contents = std::fs::read_to_string(&tmp).unwrap();
+        assert_eq!(contents, "first\nsecond\n");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn exec_dup_fd() {
+        assert_output("exec 3>&1; echo dup_works >&3", "dup_works\n");
+    }
+
+    #[test]
+    fn exec_close_fd() {
+        let tmp = format!("/tmp/epsh_test_exec_close_{}", std::process::id());
+        let _ = std::fs::remove_file(&tmp);
+        let (stdout, _, code) = run(
+            &format!("exec 3>{tmp}; echo via_fd3 >&3; exec 3>&-; cat {tmp}")
+        );
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "via_fd3\n");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn exec_read_write() {
+        let tmp = format!("/tmp/epsh_test_exec_rw_{}", std::process::id());
+        let _ = std::fs::remove_file(&tmp);
+        let (stdout, _, code) = run(
+            &format!("echo content > {tmp}; exec 4<>{tmp}; read line <&4; echo $line")
+        );
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "content\n");
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
