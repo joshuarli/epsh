@@ -490,166 +490,74 @@ impl<'a> ArithParser<'a> {
     }
 
     fn parse_and(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_bitor()?;
+        let mut left = self.parse_binop(1)?;
         while self.peek() == Some(&ArithToken::And) {
             self.pos += 1;
             // Short-circuit: if left is false, don't evaluate right side effects
             let saved = self.noeval;
             self.noeval = saved || left == 0;
-            let right = self.parse_bitor()?;
+            let right = self.parse_binop(1)?;
             self.noeval = saved;
             left = if left != 0 && right != 0 { 1 } else { 0 };
         }
         Ok(left)
     }
 
-    fn parse_bitor(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_bitxor()?;
-        while self.peek() == Some(&ArithToken::BitOr) {
-            self.pos += 1;
-            let right = self.parse_bitxor()?;
-            left |= right;
-        }
-        Ok(left)
-    }
-
-    fn parse_bitxor(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_bitand()?;
-        while self.peek() == Some(&ArithToken::BitXor) {
-            self.pos += 1;
-            let right = self.parse_bitand()?;
-            left ^= right;
-        }
-        Ok(left)
-    }
-
-    fn parse_bitand(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_equality()?;
-        while self.peek() == Some(&ArithToken::BitAnd) {
-            self.pos += 1;
-            let right = self.parse_equality()?;
-            left &= right;
-        }
-        Ok(left)
-    }
-
-    fn parse_equality(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_relational()?;
-        loop {
-            match self.peek() {
-                Some(&ArithToken::Eq) => {
-                    self.pos += 1;
-                    let right = self.parse_relational()?;
-                    left = if left == right { 1 } else { 0 };
-                }
-                Some(&ArithToken::Ne) => {
-                    self.pos += 1;
-                    let right = self.parse_relational()?;
-                    left = if left != right { 1 } else { 0 };
-                }
-                _ => break,
+    /// Apply a binary operator token to two operands. Returns None if the
+    /// token is not a binary operator at this precedence level.
+    fn apply_binop(tok: &ArithToken, left: i64, right: i64) -> Result<Option<i64>, String> {
+        Ok(Some(match tok {
+            ArithToken::BitOr => left | right,
+            ArithToken::BitXor => left ^ right,
+            ArithToken::BitAnd => left & right,
+            ArithToken::Eq => if left == right { 1 } else { 0 },
+            ArithToken::Ne => if left != right { 1 } else { 0 },
+            ArithToken::Lt => if left < right { 1 } else { 0 },
+            ArithToken::Le => if left <= right { 1 } else { 0 },
+            ArithToken::Gt => if left > right { 1 } else { 0 },
+            ArithToken::Ge => if left >= right { 1 } else { 0 },
+            ArithToken::Shl => left << right,
+            ArithToken::Shr => left >> right,
+            ArithToken::Plus => left + right,
+            ArithToken::Minus => left - right,
+            ArithToken::Star => left * right,
+            ArithToken::Slash => {
+                if right == 0 { return Err("division by zero".into()); }
+                left / right
             }
-        }
-        Ok(left)
-    }
-
-    fn parse_relational(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_shift()?;
-        loop {
-            match self.peek() {
-                Some(&ArithToken::Lt) => {
-                    self.pos += 1;
-                    let right = self.parse_shift()?;
-                    left = if left < right { 1 } else { 0 };
-                }
-                Some(&ArithToken::Le) => {
-                    self.pos += 1;
-                    let right = self.parse_shift()?;
-                    left = if left <= right { 1 } else { 0 };
-                }
-                Some(&ArithToken::Gt) => {
-                    self.pos += 1;
-                    let right = self.parse_shift()?;
-                    left = if left > right { 1 } else { 0 };
-                }
-                Some(&ArithToken::Ge) => {
-                    self.pos += 1;
-                    let right = self.parse_shift()?;
-                    left = if left >= right { 1 } else { 0 };
-                }
-                _ => break,
+            ArithToken::Percent => {
+                if right == 0 { return Err("division by zero".into()); }
+                left % right
             }
-        }
-        Ok(left)
+            _ => return Ok(None),
+        }))
     }
 
-    fn parse_shift(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_additive()?;
-        loop {
-            match self.peek() {
-                Some(&ArithToken::Shl) => {
-                    self.pos += 1;
-                    let right = self.parse_additive()?;
-                    left <<= right;
-                }
-                Some(&ArithToken::Shr) => {
-                    self.pos += 1;
-                    let right = self.parse_additive()?;
-                    left >>= right;
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
+    /// Precedence level for binary operators (higher = tighter binding).
+    fn precedence(tok: &ArithToken) -> Option<u8> {
+        Some(match tok {
+            ArithToken::BitOr => 1,
+            ArithToken::BitXor => 2,
+            ArithToken::BitAnd => 3,
+            ArithToken::Eq | ArithToken::Ne => 4,
+            ArithToken::Lt | ArithToken::Le | ArithToken::Gt | ArithToken::Ge => 5,
+            ArithToken::Shl | ArithToken::Shr => 6,
+            ArithToken::Plus | ArithToken::Minus => 7,
+            ArithToken::Star | ArithToken::Slash | ArithToken::Percent => 8,
+            _ => return None,
+        })
     }
 
-    fn parse_additive(&mut self) -> Result<i64, String> {
-        let mut left = self.parse_multiplicative()?;
-        loop {
-            match self.peek() {
-                Some(&ArithToken::Plus) => {
-                    self.pos += 1;
-                    let right = self.parse_multiplicative()?;
-                    left += right;
-                }
-                Some(&ArithToken::Minus) => {
-                    self.pos += 1;
-                    let right = self.parse_multiplicative()?;
-                    left -= right;
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_multiplicative(&mut self) -> Result<i64, String> {
+    /// Parse binary operators using precedence climbing.
+    fn parse_binop(&mut self, min_prec: u8) -> Result<i64, String> {
         let mut left = self.parse_unary()?;
-        loop {
-            match self.peek() {
-                Some(&ArithToken::Star) => {
-                    self.pos += 1;
-                    let right = self.parse_unary()?;
-                    left *= right;
-                }
-                Some(&ArithToken::Slash) => {
-                    self.pos += 1;
-                    let right = self.parse_unary()?;
-                    if right == 0 {
-                        return Err("division by zero".into());
-                    }
-                    left /= right;
-                }
-                Some(&ArithToken::Percent) => {
-                    self.pos += 1;
-                    let right = self.parse_unary()?;
-                    if right == 0 {
-                        return Err("division by zero".into());
-                    }
-                    left %= right;
-                }
-                _ => break,
-            }
+        while let Some(tok) = self.peek().cloned()
+            && let Some(prec) = Self::precedence(&tok)
+            && prec >= min_prec
+        {
+            self.pos += 1;
+            let right = self.parse_binop(prec + 1)?;
+            left = Self::apply_binop(&tok, left, right)?.unwrap();
         }
         Ok(left)
     }

@@ -307,14 +307,10 @@ impl Shell {
         ExitStatus::SUCCESS
     }
 
-    fn builtin_eval(&mut self, args: &[String]) -> crate::error::Result<ExitStatus> {
-        if args.len() <= 1 {
-            return Ok(ExitStatus::SUCCESS);
-        }
-        let script = args[1..].join(" ");
-        // eval must propagate control flow (break, continue, return, exit)
-        // unlike run_script which catches them
-        let mut parser = Parser::new(&script);
+    /// Parse and execute a script inline (propagates control flow).
+    /// Used by eval and dot builtins.
+    fn run_inline(&mut self, source: &str) -> crate::error::Result<ExitStatus> {
+        let mut parser = Parser::new(source);
         let program = match parser.parse() {
             Ok(p) => p,
             Err(e) => {
@@ -323,8 +319,6 @@ impl Shell {
             }
         };
         if program.commands.is_empty() {
-            // Empty body: return SUCCESS (not the caller's expansion $?)
-            // eval " $(false)" → body is empty → 0
             return Ok(ExitStatus::SUCCESS);
         }
         let mut status = ExitStatus::SUCCESS;
@@ -333,6 +327,13 @@ impl Shell {
             self.exit_status = status;
         }
         Ok(status)
+    }
+
+    fn builtin_eval(&mut self, args: &[String]) -> crate::error::Result<ExitStatus> {
+        if args.len() <= 1 {
+            return Ok(ExitStatus::SUCCESS);
+        }
+        self.run_inline(&args[1..].join(" "))
     }
 
     fn builtin_dot(&mut self, args: &[String], _span: Span) -> crate::error::Result<ExitStatus> {
@@ -346,26 +347,10 @@ impl Shell {
             Ok(bytes) => crate::encoding::bytes_to_str(&bytes),
             Err(e) => {
                 self.err_msg(&format!(".: {filename}: {e}"));
-                // . is a special builtin — file not found is fatal
                 return Err(ShellError::Exit(ExitStatus::NOT_FOUND));
             }
         };
-        // dot runs in the current shell (not a subshell), and must
-        // propagate break/continue/return/exit
-        let mut parser = Parser::new(&content);
-        let program = match parser.parse() {
-            Ok(p) => p,
-            Err(e) => {
-                self.err_msg(&format!("epsh: {e}"));
-                return Ok(ExitStatus::MISUSE);
-            }
-        };
-        let mut status = ExitStatus::SUCCESS;
-        for cmd in &program.commands {
-            status = self.eval_command(cmd)?;
-            self.exit_status = status;
-        }
-        Ok(status)
+        self.run_inline(&content)
     }
 
     fn builtin_test(&self, args: &[String]) -> ExitStatus {

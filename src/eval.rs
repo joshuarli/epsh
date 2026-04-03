@@ -11,6 +11,27 @@ use crate::ast::*;
 /// Either pure (no shell state modification) or delegates to pure commands.
 /// `command` is included because it dispatches to builtins/externals which
 /// work correctly with the output sink capture mechanism.
+/// Spawn a thread that relays data from a readable stream to a sink.
+fn spawn_relay(
+    stream: impl std::io::Read + Send + 'static,
+    sink: Arc<Mutex<dyn Write + Send>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut reader = std::io::BufReader::new(stream);
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut w) = sink.lock() {
+                        let _ = w.write_all(&buf[..n]);
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn is_pure_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -843,6 +864,19 @@ impl Shell {
         result
     }
 
+    /// Handle exec/spawn failure — report error and return appropriate status.
+    fn handle_exec_error(&self, e: &std::io::Error, cmd_name: &str) -> crate::error::Result<ExitStatus> {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            self.err_msg(&format!("{cmd_name}: not found"));
+            Ok(ExitStatus::NOT_FOUND)
+        } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+            self.err_msg(&format!("{cmd_name}: permission denied"));
+            Ok(ExitStatus::NOT_EXECUTABLE)
+        } else {
+            Err(ShellError::Io(std::io::Error::new(e.kind(), e.to_string())))
+        }
+    }
+
     /// Execute an external command.
     pub(crate) fn eval_external(
         &mut self,
@@ -870,15 +904,7 @@ impl Shell {
             }
             let err = crate::builtins::exec::execvp(&args[0], args);
             self.restore_redirections(saved);
-            if err.kind() == std::io::ErrorKind::NotFound {
-                self.err_msg(&format!("{}: not found", args[0]));
-                return Ok(ExitStatus::NOT_FOUND);
-            } else if err.kind() == std::io::ErrorKind::PermissionDenied {
-                self.err_msg(&format!("{}: permission denied", args[0]));
-                return Ok(ExitStatus::NOT_EXECUTABLE);
-            } else {
-                return Err(ShellError::Io(err));
-            }
+            return self.handle_exec_error(&err, &args[0]);
         }
 
         let mut cmd = std::process::Command::new(&args[0]);
@@ -915,38 +941,10 @@ impl Shell {
                 // Spawn relay threads for sinks, keeping handles to join later
                 let mut handles = Vec::new();
                 if let Some(stdout) = child.stdout.take() {
-                    let sink = self.stdout_sink.clone().unwrap();
-                    handles.push(std::thread::spawn(move || {
-                        let mut buf = [0u8; 4096];
-                        let mut reader = std::io::BufReader::new(stdout);
-                        loop {
-                            match std::io::Read::read(&mut reader, &mut buf) {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => {
-                                    if let Ok(mut w) = sink.lock() {
-                                        let _ = w.write_all(&buf[..n]);
-                                    }
-                                }
-                            }
-                        }
-                    }));
+                    handles.push(spawn_relay(stdout, self.stdout_sink.clone().unwrap()));
                 }
                 if let Some(stderr) = child.stderr.take() {
-                    let sink = self.stderr_sink.clone().unwrap();
-                    handles.push(std::thread::spawn(move || {
-                        let mut buf = [0u8; 4096];
-                        let mut reader = std::io::BufReader::new(stderr);
-                        loop {
-                            match std::io::Read::read(&mut reader, &mut buf) {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => {
-                                    if let Ok(mut w) = sink.lock() {
-                                        let _ = w.write_all(&buf[..n]);
-                                    }
-                                }
-                            }
-                        }
-                    }));
+                    handles.push(spawn_relay(stderr, self.stderr_sink.clone().unwrap()));
                 }
 
                 // Cancel-aware wait using try_wait
@@ -980,17 +978,7 @@ impl Shell {
                     Err(e) => Err(ShellError::Io(e)),
                 }
             }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    self.err_msg(&format!("{}: not found", args[0]));
-                    Ok(ExitStatus::NOT_FOUND)
-                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    self.err_msg(&format!("{}: permission denied", args[0]));
-                    Ok(ExitStatus::NOT_EXECUTABLE)
-                } else {
-                    Err(ShellError::Io(e))
-                }
-            }
+            Err(e) => self.handle_exec_error(&e, &args[0]),
         };
 
         self.restore_redirections(saved);
