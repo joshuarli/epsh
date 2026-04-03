@@ -2,6 +2,7 @@
 name = "epsh"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.85"
 description = "embeddable posix shell"
 license = "MIT"
 repository = "https://github.com/joshuarli/epsh"
@@ -10,8 +11,21 @@ keywords = ["shell", "posix", "embedded", "scripting"]
 categories = ["command-line-utilities", "os::unix-apis"]
 exclude = ["check.t", "check.pl", "check-epsh.t", "filter-tests.pl", "tests/stress/"]
 
+[lib]
+name = "epsh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "epsh"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2.184"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
