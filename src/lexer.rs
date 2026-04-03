@@ -1,4 +1,4 @@
-use crate::ast::{Command, ParamExpr, ParamOp, WordPart};
+use crate::ast::{ParamExpr, ParamOp, WordPart};
 use crate::error::{ShellError, Span};
 
 /// Token types produced by the lexer.
@@ -91,6 +91,16 @@ pub struct PendingHereDoc {
     pub delimiter: String,
     pub strip_tabs: bool,
     pub quoted: bool,
+}
+
+/// Context for the unified word-part parser.
+/// Controls termination conditions and backslash handling.
+#[derive(Clone, Copy, PartialEq)]
+enum WordCtx {
+    /// Top-level word: terminates on shell metacharacters or closing "
+    Word,
+    /// Inside ${var op ...}: terminates on unescaped } at depth 0
+    Brace,
 }
 
 /// Shell lexer / tokenizer.
@@ -348,7 +358,7 @@ impl Lexer {
 
     /// Read a word token. Produces Vec<WordPart> directly (single-pass).
     fn read_word(&mut self, span: Span) -> std::result::Result<(Token, Span), ShellError> {
-        let (parts, had_quoting) = self.read_word_parts(false, span)?;
+        let (parts, had_quoting) = self.read_word_parts(WordCtx::Word, false, span)?;
 
         if parts.is_empty() {
             return Err(ShellError::Syntax {
@@ -386,57 +396,85 @@ impl Lexer {
         Ok((Token::Word(parts, had_quoting), span))
     }
 
-    /// Main recursive word-part builder. Reads characters and produces WordPart nodes.
-    /// `in_dquote`: whether we're inside double quotes (affects quoting rules).
-    /// Stops at word delimiters in unquoted context.
-    /// Returns (parts, had_quoting) — had_quoting is true if any quoting was encountered
-    /// (single quotes, double quotes, backslash escapes).
+    /// Unified word-part builder. Reads characters and produces WordPart nodes.
+    ///
+    /// `ctx` controls termination: `Word` stops at shell metacharacters,
+    /// `Brace` stops at unescaped `}` (with depth tracking for nested `${}`).
+    ///
+    /// `in_dquote` controls quoting rules: single quotes are literal in dquote,
+    /// backslash only escapes `$`, `` ` ``, `"`, `\`, `\n`.
+    ///
+    /// Returns (parts, had_quoting).
     fn read_word_parts(
         &mut self,
+        ctx: WordCtx,
         in_dquote: bool,
         span: Span,
     ) -> std::result::Result<(Vec<WordPart>, bool), ShellError> {
         let mut parts = Vec::new();
         let mut literal = String::new();
-        let at_start = true;
-        let mut had_quoting = in_dquote; // if already in dquote, quoting occurred
+        let mut had_quoting = in_dquote;
+        let mut brace_depth = 1u32; // only meaningful when ctx == Brace
 
         loop {
-            let ch = if in_dquote {
-                // Inside double quotes, we use advance() which eats \<newline>
-                self.peek()
-            } else {
-                self.peek()
-            };
+            let ch = self.peek();
 
             match ch {
-                None => break,
+                None => {
+                    if ctx == WordCtx::Brace {
+                        return Err(ShellError::Syntax {
+                            msg: "unterminated ${".into(),
+                            span,
+                        });
+                    }
+                    break;
+                }
                 Some(ch) => {
-                    if !in_dquote {
-                        // Word delimiters in unquoted context
-                        match ch {
-                            ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>' => break,
-                            '#' if parts.is_empty() && literal.is_empty() => break,
-                            _ => {}
+                    // Termination checks per context
+                    if ctx == WordCtx::Word {
+                        if !in_dquote {
+                            match ch {
+                                ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<'
+                                | '>' => break,
+                                '#' if parts.is_empty() && literal.is_empty() => break,
+                                _ => {}
+                            }
+                        } else if ch == '"' {
+                            break;
                         }
+                    } else if ctx == WordCtx::Brace && ch == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            self.advance(); // consume closing }
+                            break;
+                        }
+                        literal.push('}');
+                        self.advance();
+                        continue;
                     }
 
                     match ch {
                         '"' if !in_dquote => {
-                            // Double quote: collect inner parts
                             if !literal.is_empty() {
                                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
                             }
                             self.advance(); // consume opening "
                             let inner = self.read_dquote_parts(span)?;
-                            had_quoting = true;                            parts.push(WordPart::DoubleQuoted(inner));
+                            had_quoting = true;
+                            parts.push(WordPart::DoubleQuoted(inner));
                         }
-                        '"' if in_dquote => {
-                            // Closing double quote — stop collecting
-                            break;
+                        '"' if in_dquote && ctx == WordCtx::Brace => {
+                            // Inner double quote inside "${...}" toggles context (dash's innerdq).
+                            if !literal.is_empty() {
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                            }
+                            self.advance(); // consume opening inner "
+                            let inner = self.read_brace_dquote_toggle_parts(span)?;
+                            parts.extend(inner);
                         }
+                        // ('"' if in_dquote && ctx == Word is caught by termination above)
+
                         '\'' if !in_dquote => {
-                            // Single quote: read until closing '
                             if !literal.is_empty() {
                                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
                             }
@@ -454,13 +492,18 @@ impl Lexer {
                                     Some(c) => content.push(c),
                                 }
                             }
-                            had_quoting = true;                            parts.push(WordPart::SingleQuoted(content));
+                            had_quoting = true;
+                            parts.push(WordPart::SingleQuoted(content));
                         }
+
                         '\\' if in_dquote => {
-                            had_quoting = true; self.advance(); // consume backslash
+                            had_quoting = true;
+                            self.advance(); // consume backslash
                             if let Some(c) = self.advance() {
-                                // In double quotes, backslash only escapes $, `, ", \, and newline
-                                if matches!(c, '$' | '`' | '"' | '\\' | '\n') {
+                                if ctx == WordCtx::Brace && c == '}' {
+                                    // Inside ${...}, \} always escapes }
+                                    literal.push(c);
+                                } else if matches!(c, '$' | '`' | '"' | '\\' | '\n') {
                                     if c != '\n' {
                                         literal.push(c);
                                     }
@@ -471,17 +514,25 @@ impl Lexer {
                             }
                         }
                         '\\' => {
-                            // Unquoted backslash — preserve \ for glob chars so
-                            // fnmatch can distinguish \? (literal) from ? (glob).
-                            // Quote removal strips these during normal expansion.
-                            had_quoting = true; self.advance(); // consume backslash
+                            had_quoting = true;
+                            self.advance(); // consume backslash
                             if let Some(escaped) = self.advance() {
-                                if matches!(escaped, '*' | '?' | '[' | ']') {
+                                if ctx == WordCtx::Brace && escaped == '}' {
+                                    // Inside ${...}, \} always escapes }
+                                    literal.push(escaped);
+                                } else if ctx == WordCtx::Word
+                                    && matches!(escaped, '*' | '?' | '[' | ']')
+                                {
+                                    // Preserve \ for glob chars so fnmatch can
+                                    // distinguish \? (literal) from ? (glob).
                                     literal.push('\\');
+                                    literal.push(escaped);
+                                } else {
+                                    literal.push(escaped);
                                 }
-                                literal.push(escaped);
                             }
                         }
+
                         '$' => {
                             if !literal.is_empty() {
                                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
@@ -490,7 +541,6 @@ impl Lexer {
                             if let Some(part) = self.read_dollar(in_dquote, span)? {
                                 parts.push(part);
                             } else {
-                                // Bare $
                                 literal.push('$');
                             }
                         }
@@ -502,8 +552,12 @@ impl Lexer {
                             let part = self.read_backtick_part(span)?;
                             parts.push(part);
                         }
-                        '~' if !in_dquote && parts.is_empty() && literal.is_empty() && at_start => {
-                            // Tilde expansion at word start
+
+                        '~' if ctx == WordCtx::Word
+                            && !in_dquote
+                            && parts.is_empty()
+                            && literal.is_empty() =>
+                        {
                             self.advance(); // consume ~
                             let mut user = String::new();
                             while let Some(c) = self.peek() {
@@ -517,6 +571,7 @@ impl Lexer {
                             }
                             parts.push(WordPart::Tilde(user));
                         }
+
                         _ => {
                             literal.push(ch);
                             self.advance();
@@ -538,7 +593,7 @@ impl Lexer {
         &mut self,
         span: Span,
     ) -> std::result::Result<Vec<WordPart>, ShellError> {
-        let (parts, _) = self.read_word_parts(true, span)?;
+        let (parts, _) = self.read_word_parts(WordCtx::Word, true, span)?;
         // Consume the closing "
         match self.peek() {
             Some('"') => {
@@ -712,7 +767,7 @@ impl Lexer {
                 match self.peek() {
                     Some(op2 @ ('-' | '=' | '?' | '+')) => {
                         self.advance(); // consume op2
-                        let word = self.read_brace_word_parts(in_dquote, span)?;
+                        let word = self.read_word_parts(WordCtx::Brace, in_dquote, span)?.0;
                         match op2 {
                             '-' => ParamOp::Default { colon: true, word },
                             '=' => ParamOp::Assign { colon: true, word },
@@ -729,19 +784,19 @@ impl Lexer {
                 }
             }
             '-' => {
-                let word = self.read_brace_word_parts(in_dquote, span)?;
+                let word = self.read_word_parts(WordCtx::Brace, in_dquote, span)?.0;
                 ParamOp::Default { colon: false, word }
             }
             '=' => {
-                let word = self.read_brace_word_parts(in_dquote, span)?;
+                let word = self.read_word_parts(WordCtx::Brace, in_dquote, span)?.0;
                 ParamOp::Assign { colon: false, word }
             }
             '?' => {
-                let word = self.read_brace_word_parts(in_dquote, span)?;
+                let word = self.read_word_parts(WordCtx::Brace, in_dquote, span)?.0;
                 ParamOp::Error { colon: false, word }
             }
             '+' => {
-                let word = self.read_brace_word_parts(in_dquote, span)?;
+                let word = self.read_word_parts(WordCtx::Brace, in_dquote, span)?.0;
                 ParamOp::Alternative { colon: false, word }
             }
             // Trim ops: ALWAYS use BASESYNTAX (single quotes are quoting)
@@ -749,20 +804,20 @@ impl Lexer {
             '%' => {
                 if self.peek() == Some('%') {
                     self.advance();
-                    let word = self.read_brace_word_parts(false, span)?;
+                    let word = self.read_word_parts(WordCtx::Brace, false, span)?.0;
                     ParamOp::TrimSuffixLarge(word)
                 } else {
-                    let word = self.read_brace_word_parts(false, span)?;
+                    let word = self.read_word_parts(WordCtx::Brace, false, span)?.0;
                     ParamOp::TrimSuffixSmall(word)
                 }
             }
             '#' => {
                 if self.peek() == Some('#') {
                     self.advance();
-                    let word = self.read_brace_word_parts(false, span)?;
+                    let word = self.read_word_parts(WordCtx::Brace, false, span)?.0;
                     ParamOp::TrimPrefixLarge(word)
                 } else {
-                    let word = self.read_brace_word_parts(false, span)?;
+                    let word = self.read_word_parts(WordCtx::Brace, false, span)?.0;
                     ParamOp::TrimPrefixSmall(word)
                 }
             }
@@ -888,124 +943,6 @@ impl Lexer {
             parts.push(WordPart::Literal(literal));
         }
         Ok(parts)
-    }
-
-    fn read_brace_word_parts(
-        &mut self,
-        in_dquote: bool,
-        span: Span,
-    ) -> std::result::Result<Vec<WordPart>, ShellError> {
-        let mut parts = Vec::new();
-        let mut literal = String::new();
-        let mut depth = 1u32;
-
-        loop {
-            match self.peek() {
-                None => {
-                    return Err(ShellError::Syntax {
-                        msg: "unterminated ${".into(),
-                        span,
-                    });
-                }
-                Some('}') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        self.advance(); // consume closing }
-                        break;
-                    }
-                    literal.push('}');
-                    self.advance();
-                }
-                // Single quotes: quoting in unquoted context (BASESYNTAX for trim ops)
-                Some('\'') if !in_dquote => {
-                    if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                    }
-                    self.advance_raw(); // consume opening '
-                    let mut content = String::new();
-                    loop {
-                        match self.advance_raw() {
-                            None => {
-                                return Err(ShellError::Syntax {
-                                    msg: "unterminated single quote".into(),
-                                    span,
-                                });
-                            }
-                            Some('\'') => break,
-                            Some(c) => content.push(c),
-                        }
-                    }
-                            parts.push(WordPart::SingleQuoted(content));
-                }
-                Some('"') if !in_dquote => {
-                    if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                    }
-                    self.advance(); // consume opening "
-                    let inner = self.read_dquote_parts(span)?;
-                            parts.push(WordPart::DoubleQuoted(inner));
-                }
-                Some('"') if in_dquote => {
-                    // Inner double quote inside "${...}" toggles context (dash's innerdq).
-                    // Content between inner quotes is effectively unquoted.
-                    if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                    }
-                    self.advance(); // consume opening inner "
-                    // Read until matching " with unquoted rules
-                    let inner = self.read_brace_dquote_toggle_parts(span)?;
-                    parts.extend(inner);
-                }
-                Some('$') => {
-                    self.advance(); // consume $
-                    // Don't increment depth — read_dollar handles nested ${} internally
-                    if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                    }
-                    if let Some(part) = self.read_dollar(in_dquote, span)? {
-                        parts.push(part);
-                    } else {
-                        literal.push('$');
-                    }
-                }
-                Some('\\') => {
-                    self.advance(); // consume backslash
-                    if let Some(c) = self.advance() {
-                        // Inside ${...}, \} always escapes } (prevents closing the expansion)
-                        if c == '}' {
-                            literal.push(c);
-                        } else if in_dquote && matches!(c, '$' | '`' | '"' | '\\' | '\n') {
-                            if c != '\n' {
-                                literal.push(c);
-                            }
-                        } else if in_dquote {
-                            literal.push('\\');
-                            literal.push(c);
-                        } else {
-                            literal.push(c);
-                        }
-                    }
-                }
-                Some('`') => {
-                    if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
-                    }
-                    self.advance(); // consume `
-                    let part = self.read_backtick_part(span)?;
-                    parts.push(part);
-                }
-                Some(c) => {
-                    literal.push(c);
-                    self.advance();
-                }
-            }
-        }
-
-        if !literal.is_empty() {
-            parts.push(WordPart::Literal(literal));
-        }
-
-        Ok(coalesce_literals(parts))
     }
 
     /// Read `$(...)` command substitution after `$(` has been consumed.
@@ -1581,20 +1518,7 @@ fn try_split_assignment(parts: &[WordPart]) -> Option<(String, Vec<WordPart>)> {
     None
 }
 
-/// Coalesce adjacent Literal parts.
-fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
-    let mut result = Vec::with_capacity(parts.len());
-    for part in parts {
-        if let WordPart::Literal(ref s) = part
-            && let Some(WordPart::Literal(prev)) = result.last_mut()
-        {
-            prev.push_str(s);
-            continue;
-        }
-        result.push(part);
-    }
-    result
-}
+use crate::parser::{coalesce_literals, parse_cmdsubst_content};
 
 /// Extract the plain text from word parts (for heredoc delimiter, func name, for-var, etc.).
 /// Only extracts from Literal and SingleQuoted parts.
@@ -1638,37 +1562,6 @@ pub fn parts_have_quoting(parts: &[WordPart]) -> bool {
         }
     }
     false
-}
-
-/// Parse command substitution content by recursively invoking the parser.
-fn parse_cmdsubst_content(content: &str) -> Command {
-    match crate::parser::Parser::new(content).parse() {
-        Ok(program) => {
-            if program.commands.is_empty() {
-                Command::Simple {
-                    assigns: Vec::new(),
-                    args: Vec::new(),
-                    redirs: Vec::new(),
-                    span: Span::default(),
-                }
-            } else if program.commands.len() == 1 {
-                program.commands.into_iter().next().unwrap()
-            } else {
-                let mut iter = program.commands.into_iter();
-                let mut result = iter.next().unwrap();
-                for cmd in iter {
-                    result = Command::Sequence(Box::new(result), Box::new(cmd));
-                }
-                result
-            }
-        }
-        Err(_) => Command::Simple {
-            assigns: Vec::new(),
-            args: Vec::new(),
-            redirs: Vec::new(),
-            span: Span::default(),
-        },
-    }
 }
 
 #[cfg(test)]

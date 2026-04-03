@@ -73,7 +73,7 @@ pub type Result<T> = std::result::Result<T, ShellError>;
 
 /// Shell exit status (0-255). Provides type safety over bare i32.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ExitStatus(pub i32);
+pub struct ExitStatus(i32);
 
 impl ExitStatus {
     pub const SUCCESS: ExitStatus = ExitStatus(0);
@@ -82,8 +82,23 @@ impl ExitStatus {
     pub const NOT_FOUND: ExitStatus = ExitStatus(127);
     pub const NOT_EXECUTABLE: ExitStatus = ExitStatus(126);
 
+    /// The raw exit code as an integer.
+    pub fn code(self) -> i32 {
+        self.0
+    }
+
     pub fn success(self) -> bool {
         self.0 == 0
+    }
+
+    /// Return SUCCESS if the condition is true, FAILURE otherwise.
+    pub fn from_bool(ok: bool) -> Self {
+        if ok { Self::SUCCESS } else { Self::FAILURE }
+    }
+
+    /// Logical negation: SUCCESS becomes FAILURE and vice versa.
+    pub fn inverted(self) -> Self {
+        Self::from_bool(!self.success())
     }
 
     /// Create from a process wait status (as returned by waitpid).

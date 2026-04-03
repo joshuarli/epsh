@@ -92,20 +92,20 @@ impl Shell {
                 }
                 Err(ShellError::Exit(n)) => {
                     self.run_exit_trap();
-                    return n.0;
+                    return n.code();
                 }
                 Err(e) => {
                     eprintln!("epsh: {e}");
                     self.exit_status = ExitStatus::MISUSE;
                     // Non-interactive shell: most errors are fatal
                     self.run_exit_trap();
-                    return self.exit_status.0;
+                    return self.exit_status.code();
                 }
             }
         }
 
         self.run_exit_trap();
-        self.exit_status.0
+        self.exit_status.code()
     }
 
     /// Run the EXIT trap if one is set.
@@ -208,11 +208,7 @@ impl Shell {
                 }
                 let status = self.eval_pipeline(commands)?;
                 self.tested = saved;
-                Ok(if *bang {
-                    ExitStatus(status.success() as i32)
-                } else {
-                    status
-                })
+                Ok(if *bang { status.inverted() } else { status })
             }
 
             Command::And(left, right) => {
@@ -434,7 +430,7 @@ impl Shell {
                 self.tested = true;
                 let status = self.eval_command(cmd)?;
                 self.tested = saved;
-                Ok(ExitStatus(status.success() as i32))
+                Ok(status.inverted())
             }
 
             Command::Background { cmd, redirs } => {
@@ -557,7 +553,7 @@ impl Shell {
         let result = match cmd.status() {
             Ok(status) => {
                 let code = status.code().unwrap_or(128);
-                Ok(ExitStatus(code))
+                Ok(ExitStatus::from(code))
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -626,7 +622,7 @@ impl Shell {
                         Err(ShellError::Exit(n)) => n,
                         Err(_) => ExitStatus::FAILURE,
                     };
-                    sys::exit_child(status.0);
+                    sys::exit_child(status);
                 }
 
                 children.push(pid);
@@ -673,7 +669,7 @@ impl Shell {
 
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
-                    Err(_) => sys::exit_child(1),
+                    Err(_) => sys::exit_child(ExitStatus::FAILURE),
                 };
                 let status = match self.eval_command(body) {
                     Ok(s) => s,
@@ -682,7 +678,7 @@ impl Shell {
                 };
                 // Run subshell's own EXIT trap if it set one
                 self.run_exit_trap();
-                sys::exit_child(status.0);
+                sys::exit_child(status);
             }
 
             // Parent
@@ -703,14 +699,14 @@ impl Shell {
             if pid == 0 {
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
-                    Err(_) => sys::exit_child(1),
+                    Err(_) => sys::exit_child(ExitStatus::FAILURE),
                 };
                 let status = match self.eval_command(cmd) {
                     Ok(s) => s,
                     Err(ShellError::Exit(n)) => n,
                     Err(_) => ExitStatus::FAILURE,
                 };
-                sys::exit_child(status.0);
+                sys::exit_child(status);
             }
 
             // Don't wait — background process
@@ -772,7 +768,7 @@ impl Shell {
                     Err(_) => ExitStatus::FAILURE,
                 };
                 self.run_exit_trap();
-                sys::exit_child(status.0);
+                sys::exit_child(status);
             }
 
             // Parent: read from read end
@@ -785,7 +781,7 @@ impl Shell {
             let mut status = 0i32;
             sys::waitpid(pid, &mut status, 0);
             if sys::wifexited(status) {
-                self.exit_status = ExitStatus(sys::wexitstatus(status));
+                self.exit_status = ExitStatus::from(sys::wexitstatus(status));
             }
 
             // Remove trailing newlines (POSIX requirement)

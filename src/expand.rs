@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn expand_exit_status() {
-        let mut sh = TestShell::with_status(make_vars(), ExitStatus(42));
+        let mut sh = TestShell::with_status(make_vars(), ExitStatus::from(42));
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "?".into(),
             op: ParamOp::Normal,

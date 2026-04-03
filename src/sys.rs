@@ -24,10 +24,10 @@ pub fn wtermsig(status: i32) -> i32 {
 /// Exit the process, flushing Rust's stdout first.
 /// Raw `_exit()` skips Rust's BufWriter flush, which loses buffered output
 /// when fd 1 is a pipe (e.g. in command substitution or pipelines).
-pub fn exit_child(status: i32) -> ! {
+pub fn exit_child(status: crate::error::ExitStatus) -> ! {
     {
         let mut out = std::io::stdout().lock();
         let _ = std::io::Write::flush(&mut out);
     }
-    unsafe { libc::_exit(status) }
+    unsafe { libc::_exit(status.code()) }
 }

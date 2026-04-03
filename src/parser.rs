@@ -958,7 +958,7 @@ impl Parser {
 /// Parse a raw word string into WordPart nodes.
 /// Kept for heredoc body expansion (called from redirect.rs).
 pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
-    parse_word_parts_ctx(raw, false)
+    parse_word_parts_impl(raw, false)
 }
 
 /// Build a HereDocBody from a raw heredoc body string.
@@ -1036,10 +1036,6 @@ fn parse_word_parts_heredoc(raw: &str) -> Vec<WordPart> {
     }
 
     coalesce_literals(parts)
-}
-
-fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
-    parse_word_parts_impl(raw, in_dquote)
 }
 
 fn parse_word_parts_impl(raw: &str, in_dquote: bool) -> Vec<WordPart> {
@@ -1529,11 +1525,11 @@ fn read_brace_word(chars: &[char], i: &mut usize, in_dquote: bool) -> Vec<WordPa
         }
     }
 
-    parse_word_parts_ctx(&raw, in_dquote)
+    parse_word_parts_impl(&raw, in_dquote)
 }
 
 /// Coalesce adjacent Literal parts.
-fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
+pub(crate) fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
     let mut result = Vec::with_capacity(parts.len());
     for part in parts {
         if let WordPart::Literal(ref s) = part
@@ -1548,7 +1544,7 @@ fn coalesce_literals(parts: Vec<WordPart>) -> Vec<WordPart> {
 }
 
 /// Parse command substitution content by recursively invoking the parser.
-fn parse_cmdsubst_content(content: &str) -> Command {
+pub(crate) fn parse_cmdsubst_content(content: &str) -> Command {
     match Parser::new(content).parse() {
         Ok(program) => {
             if program.commands.is_empty() {

@@ -2,7 +2,7 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-156/167 (93%) mksh conformance on dash-passable tests. 9.4k lines, 136 unit tests.
+156/167 (93%) mksh conformance on dash-passable tests. 9.3k lines, 230 tests (136 unit + 94 integration).
 
 ## Architecture
 
@@ -10,16 +10,16 @@ Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for codi
 src/
   lib.rs          Public API
   main.rs         CLI binary: epsh [-c cmd] [-e] [script.sh]
-  ast.rs          (205) AST types: Command, Word, WordPart, Redir, ParamExpr
-  lexer.rs        (1912) Single-pass tokenizer with syntax-context tracking
-  parser.rs       (1924) Recursive-descent parser, heredoc body reading
-  eval.rs         (1076) Shell struct, eval dispatch, pipelines, subshells, comsub
-  builtins.rs     (1019) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
-  expand.rs       (1084) Word expansion: tilde, param, arith, IFS split, glob, patterns
+  ast.rs          (214) AST types: Command, Word, WordPart, Redir, ParamExpr
+  lexer.rs        (1805) Single-pass tokenizer with unified word-part builder
+  parser.rs       (1963) Recursive-descent parser, heredoc body reading
+  eval.rs         (1043) Shell struct, eval dispatch, pipelines, subshells, comsub
+  builtins.rs     (1025) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
+  expand.rs       (1088) Word expansion: tilde, param, arith, IFS split, glob, patterns
   arith.rs        (809)  $((…)) evaluator with short-circuit (noeval)
   var.rs          (315)  Variable storage with scope stack
   glob.rs         (289)  Custom fnmatch + pathname expansion
-  redirect.rs     (151)  FD save/restore for redirections
+  redirect.rs     (147)  FD save/restore for redirections
   test_cmd.rs     (398)  POSIX test/[ recursive-descent evaluator
   error.rs        (120)  ShellError enum, ExitStatus newtype, Result alias
   sys.rs          (33)   Thin libc wrappers
@@ -139,11 +139,15 @@ Things we know about but haven't implemented:
 ## Testing
 
 ```sh
-cargo test                                              # 136 unit tests
+cargo test                                              # 230 tests (136 unit + 94 integration)
+cargo test --test integration                           # integration tests only
 cargo build && perl check.pl -p ./target/debug/epsh \
   -s check-epsh.t                                       # 156/167 mksh conformance
 perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
 ```
+
+Integration tests in `tests/integration.rs` cover builtins, expansion, control flow,
+redirections, assignments, and POSIX edge cases (adapted from oils/spec/posix.test.sh).
 
 ## What's Not Implemented (by design)
 

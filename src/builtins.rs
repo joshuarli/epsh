@@ -36,7 +36,7 @@ impl Shell {
                 let code = args
                     .get(1)
                     .and_then(|s| s.parse::<i32>().ok())
-                    .map(ExitStatus)
+                    .map(ExitStatus::from)
                     .unwrap_or(self.exit_status);
                 return Err(ShellError::Exit(code));
             }
@@ -44,7 +44,7 @@ impl Shell {
                 let code = args
                     .get(1)
                     .and_then(|s| s.parse::<i32>().ok())
-                    .map(ExitStatus)
+                    .map(ExitStatus::from)
                     .unwrap_or(self.exit_status);
                 return Err(ShellError::Return(code));
             }
@@ -1000,11 +1000,17 @@ mod exec {
     use std::ffi::CString;
 
     pub fn execvp(cmd: &str, args: &[String]) -> std::io::Error {
-        let c_cmd = CString::new(cmd.as_bytes()).unwrap();
-        let c_args: Vec<CString> = args
+        let Ok(c_cmd) = CString::new(cmd.as_bytes()) else {
+            return std::io::Error::from_raw_os_error(libc::ENOENT);
+        };
+        let c_args: Vec<CString> = match args
             .iter()
-            .map(|a| CString::new(a.as_bytes()).unwrap())
-            .collect();
+            .map(|a| CString::new(a.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(v) => v,
+            Err(_) => return std::io::Error::from_raw_os_error(libc::EINVAL),
+        };
         let c_argv: Vec<*const i8> = c_args
             .iter()
             .map(|a| a.as_ptr())

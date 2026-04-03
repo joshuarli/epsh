@@ -199,7 +199,7 @@ impl Variables {
     /// Get a special parameter value ($?, $$, $#, $@, $*, $!, $-, $0, $1...).
     pub fn get_special(&self, name: &str, exit_status: ExitStatus, shell_pid: u32) -> Option<String> {
         match name {
-            "?" => Some(exit_status.0.to_string()),
+            "?" => Some(exit_status.code().to_string()),
             "$" => Some(shell_pid.to_string()),
             "#" => Some(self.positional.len().to_string()),
             "0" => Some(self.arg0.clone()),
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn special_params() {
         let vars = Variables::new();
-        assert_eq!(vars.get_special("?", ExitStatus(42), 1234), Some("42".into()));
+        assert_eq!(vars.get_special("?", ExitStatus::from(42), 1234), Some("42".into()));
         assert_eq!(vars.get_special("$", ExitStatus::SUCCESS, 1234), Some("1234".into()));
     }
 
