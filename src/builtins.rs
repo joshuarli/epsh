@@ -540,14 +540,53 @@ impl Shell {
         if args.len() <= 1 {
             return Ok(ExitStatus::SUCCESS);
         }
-        // Skip -v/-V flags
+        let mut mode = None; // None = execute, Some('v') = -v, Some('V') = -V
         let mut i = 1;
-        while i < args.len() && args[i].starts_with('-') {
-            i += 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-v" => { mode = Some('v'); i += 1; }
+                "-V" => { mode = Some('V'); i += 1; }
+                "-p" => { i += 1; } // -p: use default PATH (ignored for now)
+                "--" => { i += 1; break; }
+                _ => break,
+            }
         }
         if i >= args.len() {
             return Ok(ExitStatus::SUCCESS);
         }
+
+        if let Some(m) = mode {
+            // Describe commands instead of executing them
+            let mut status = ExitStatus::SUCCESS;
+            for name in &args[i..] {
+                if m == 'V' {
+                    // -V: verbose, like `type`
+                    if self.functions.contains_key(name.as_str()) {
+                        self.write_out(&format!("{name} is a function\n"));
+                    } else if is_builtin(name) {
+                        self.write_out(&format!("{name} is a shell builtin\n"));
+                    } else if let Ok(path) = which(name) {
+                        self.write_out(&format!("{name} is {path}\n"));
+                    } else {
+                        self.err_msg(&format!("{name}: not found"));
+                        status = ExitStatus::FAILURE;
+                    }
+                } else {
+                    // -v: terse — print path, or name for builtins/functions
+                    if self.functions.contains_key(name.as_str()) {
+                        self.write_out(&format!("{name}\n"));
+                    } else if is_builtin(name) {
+                        self.write_out(&format!("{name}\n"));
+                    } else if let Ok(path) = which(name) {
+                        self.write_out(&format!("{path}\n"));
+                    } else {
+                        status = ExitStatus::FAILURE;
+                    }
+                }
+            }
+            return Ok(status);
+        }
+
         let new_args: Vec<String> = args[i..].to_vec();
 
         // `command` bypasses functions but NOT builtins
