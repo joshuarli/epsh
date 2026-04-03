@@ -153,6 +153,38 @@ impl Shell {
         }
     }
 
+    /// Wait for a child process, polling the cancel flag.
+    /// On cancellation, kills the child's process group and returns Cancelled.
+    fn wait_child(&mut self, pid: i32) -> crate::error::Result<ExitStatus> {
+        // If no cancel flag, just block
+        if self.cancel.is_none() {
+            let mut status = 0i32;
+            unsafe { sys::waitpid(pid, &mut status, 0); }
+            self.child_pids.retain(|&p| p != pid);
+            return Ok(ExitStatus::from_wait(status));
+        }
+
+        // Poll with WNOHANG, checking cancel between iterations
+        loop {
+            let mut status = 0i32;
+            let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG) };
+            if ret > 0 {
+                self.child_pids.retain(|&p| p != pid);
+                return Ok(ExitStatus::from_wait(status));
+            }
+            if let Some(ref flag) = self.cancel
+                && flag.load(Ordering::Relaxed)
+            {
+                // Kill and reap
+                unsafe { libc::kill(-pid, libc::SIGKILL); }
+                unsafe { sys::waitpid(pid, &mut status, 0); }
+                self.child_pids.retain(|&p| p != pid);
+                return Err(ShellError::Cancelled);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// Kill all tracked child processes (process groups).
     fn kill_children(&mut self) {
         for &pid in &self.child_pids {
@@ -683,94 +715,97 @@ impl Shell {
         }
 
         // When sinks are set, capture child stdout/stderr and relay to sinks.
-        // Otherwise, inherit stdio (redirections are already applied to our fds).
-        let has_sinks = self.stdout_sink.is_some() || self.stderr_sink.is_some();
-        if has_sinks {
-            use std::process::Stdio;
-            if self.stdout_sink.is_some() {
-                cmd.stdout(Stdio::piped());
-            }
-            if self.stderr_sink.is_some() {
-                cmd.stderr(Stdio::piped());
-            }
+        if self.stdout_sink.is_some() {
+            cmd.stdout(std::process::Stdio::piped());
+        }
+        if self.stderr_sink.is_some() {
+            cmd.stderr(std::process::Stdio::piped());
         }
 
-        let result = if has_sinks {
-            match cmd.spawn() {
-                Ok(mut child) => {
-                    if let Some(stdout) = child.stdout.take() {
-                        let sink = self.stdout_sink.clone();
-                        std::thread::spawn(move || {
-                            if let Some(sink) = sink {
-                                let mut reader = std::io::BufReader::new(stdout);
-                                let mut buf = [0u8; 4096];
-                                loop {
-                                    match std::io::Read::read(&mut reader, &mut buf) {
-                                        Ok(0) => break,
-                                        Ok(n) => {
-                                            if let Ok(mut w) = sink.lock() {
-                                                let _ = w.write_all(&buf[..n]);
-                                            }
-                                        }
-                                        Err(_) => break,
+        let result = match cmd.spawn() {
+            Ok(mut child) => {
+                let child_id = child.id() as i32;
+                self.child_pids.push(child_id);
+
+                // Spawn relay threads for sinks, keeping handles to join later
+                let mut handles = Vec::new();
+                if let Some(stdout) = child.stdout.take() {
+                    let sink = self.stdout_sink.clone().unwrap();
+                    handles.push(std::thread::spawn(move || {
+                        let mut buf = [0u8; 4096];
+                        let mut reader = std::io::BufReader::new(stdout);
+                        loop {
+                            match std::io::Read::read(&mut reader, &mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if let Ok(mut w) = sink.lock() {
+                                        let _ = w.write_all(&buf[..n]);
                                     }
                                 }
                             }
-                        });
-                    }
-                    if let Some(stderr) = child.stderr.take() {
-                        let sink = self.stderr_sink.clone();
-                        std::thread::spawn(move || {
-                            if let Some(sink) = sink {
-                                let mut reader = std::io::BufReader::new(stderr);
-                                let mut buf = [0u8; 4096];
-                                loop {
-                                    match std::io::Read::read(&mut reader, &mut buf) {
-                                        Ok(0) => break,
-                                        Ok(n) => {
-                                            if let Ok(mut w) = sink.lock() {
-                                                let _ = w.write_all(&buf[..n]);
-                                            }
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    match child.wait() {
-                        Ok(status) => Ok(ExitStatus::from(status.code().unwrap_or(128))),
-                        Err(e) => Err(ShellError::Io(e)),
-                    }
+                        }
+                    }));
                 }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        self.err_msg(&format!("{}: not found", args[0]));
-                        Ok(ExitStatus::NOT_FOUND)
-                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        self.err_msg(&format!("{}: permission denied", args[0]));
-                        Ok(ExitStatus::NOT_EXECUTABLE)
-                    } else {
-                        Err(ShellError::Io(e))
+                if let Some(stderr) = child.stderr.take() {
+                    let sink = self.stderr_sink.clone().unwrap();
+                    handles.push(std::thread::spawn(move || {
+                        let mut buf = [0u8; 4096];
+                        let mut reader = std::io::BufReader::new(stderr);
+                        loop {
+                            match std::io::Read::read(&mut reader, &mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if let Ok(mut w) = sink.lock() {
+                                        let _ = w.write_all(&buf[..n]);
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                }
+
+                // Cancel-aware wait using try_wait
+                let wait_result = if self.cancel.is_some() {
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => break Ok(status),
+                            Ok(None) => {}
+                            Err(e) => break Err(e),
+                        }
+                        if let Some(ref flag) = self.cancel
+                            && flag.load(Ordering::Relaxed)
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            self.child_pids.retain(|&p| p != child_id);
+                            for h in handles { let _ = h.join(); }
+                            self.restore_redirections(saved);
+                            return Err(ShellError::Cancelled);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
                     }
+                } else {
+                    child.wait()
+                };
+                self.child_pids.retain(|&p| p != child_id);
+
+                // Join relay threads to ensure all output is flushed
+                for h in handles { let _ = h.join(); }
+
+                match wait_result {
+                    Ok(status) => Ok(ExitStatus::from(status.code().unwrap_or(128))),
+                    Err(e) => Err(ShellError::Io(e)),
                 }
             }
-        } else {
-            match cmd.status() {
-                Ok(status) => {
-                    let code = status.code().unwrap_or(128);
-                    Ok(ExitStatus::from(code))
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        self.err_msg(&format!("{}: not found", args[0]));
-                        Ok(ExitStatus::NOT_FOUND)
-                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        self.err_msg(&format!("{}: permission denied", args[0]));
-                        Ok(ExitStatus::NOT_EXECUTABLE)
-                    } else {
-                        Err(ShellError::Io(e))
-                    }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    self.err_msg(&format!("{}: not found", args[0]));
+                    Ok(ExitStatus::NOT_FOUND)
+                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    self.err_msg(&format!("{}: permission denied", args[0]));
+                    Ok(ExitStatus::NOT_EXECUTABLE)
+                } else {
+                    Err(ShellError::Io(e))
                 }
             }
         };
@@ -798,6 +833,7 @@ impl Shell {
         }
 
         let mut children = Vec::new();
+        let mut pgid: i32 = 0; // first child's PID becomes the pipeline's PGID
 
         for (i, cmd) in commands.iter().enumerate() {
             unsafe {
@@ -807,8 +843,10 @@ impl Shell {
                 }
 
                 if pid == 0 {
-                    // Child process — isolate in own process group
-                    libc::setpgid(0, 0);
+                    // Child: join pipeline process group
+                    // First child creates the group (pgid==0 → setpgid(0,0))
+                    // Subsequent children join it
+                    libc::setpgid(0, pgid);
                     self.in_forked_child = true;
                     // Connect stdin from previous pipe
                     if i > 0 {
@@ -833,6 +871,11 @@ impl Shell {
                     sys::exit_child(status);
                 }
 
+                // Parent: also call setpgid to avoid race with child
+                if pgid == 0 {
+                    pgid = pid; // first child's PID is the group leader
+                }
+                libc::setpgid(pid, pgid);
                 children.push(pid);
                 self.child_pids.push(pid);
             }
@@ -846,24 +889,27 @@ impl Shell {
             }
         }
 
-        // Wait for all children
+        // Wait for all children, checking cancel between stages
         let mut last_status = ExitStatus::SUCCESS;
         let mut pipefail_status = ExitStatus::SUCCESS;
         for (i, &pid) in children.iter().enumerate() {
-            let mut status = 0i32;
-            unsafe {
-                sys::waitpid(pid, &mut status, 0);
-            }
-            self.child_pids.retain(|&p| p != pid);
-            let stage_status = ExitStatus::from_wait(status);
-            if !stage_status.success() {
-                pipefail_status = stage_status;
-            }
-            if i == children.len() - 1 {
-                last_status = stage_status;
+            match self.wait_child(pid) {
+                Ok(stage_status) => {
+                    if !stage_status.success() {
+                        pipefail_status = stage_status;
+                    }
+                    if i == children.len() - 1 {
+                        last_status = stage_status;
+                    }
+                }
+                Err(ShellError::Cancelled) => {
+                    // Kill remaining pipeline children
+                    self.kill_children();
+                    return Err(ShellError::Cancelled);
+                }
+                Err(e) => return Err(e),
             }
         }
-        self.check_cancel()?;
 
         if self.opts.pipefail && !pipefail_status.success() {
             Ok(pipefail_status)
@@ -904,11 +950,7 @@ impl Shell {
 
             // Parent
             self.child_pids.push(pid);
-            let mut status = 0i32;
-            sys::waitpid(pid, &mut status, 0);
-            self.child_pids.retain(|&p| p != pid);
-            self.check_cancel()?;
-            Ok(ExitStatus::from_wait(status))
+            self.wait_child(pid)
         }
     }
 
@@ -1007,13 +1049,7 @@ impl Shell {
             let mut read_file = std::fs::File::from_raw_fd(fds[0]);
             let _ = read_file.read_to_string(&mut output);
 
-            let mut status = 0i32;
-            sys::waitpid(pid, &mut status, 0);
-            self.child_pids.retain(|&p| p != pid);
-            if sys::wifexited(status) {
-                self.exit_status = ExitStatus::from(sys::wexitstatus(status));
-            }
-            self.check_cancel()?;
+            self.exit_status = self.wait_child(pid)?;
 
             // Remove trailing newlines (POSIX requirement)
             while output.ends_with('\n') {

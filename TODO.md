@@ -32,28 +32,6 @@
 ### Pattern matching edge cases (1)
 - `glob-range-1` — character class range edge cases (`[!-ab]*` etc.)
 
-## Embedding API follow-ups
-
-### Cancellation is passive, not preemptive
-`check_cancel` only fires between commands and after `waitpid` returns. A
-long-running `sleep 1000` blocks in `child.wait()` and cancellation can't
-interrupt it. For true responsiveness, `eval_external` needs a non-blocking
-wait loop that polls both the child and the cancel flag (similar to nerv's
-bash tool pattern). Pipeline waitpid should also check cancel between stages
-and kill remaining children if triggered mid-pipeline.
-
-### Sink relay threads aren't joined
-In `eval_external` with sinks, relay threads are spawned for stdout/stderr
-but the `JoinHandle`s are dropped. There's a race: `child.wait()` returns
-but the relay thread might not have flushed the last pipe buffer. Fix: store
-the handles and join them after `wait()`.
-
-### Pipeline stages get separate process groups
-`setpgid(0, 0)` in each pipeline child puts each stage in its own group.
-Killing "the pipeline" requires iterating all stage PIDs. A shared pipeline
-group (first child's PID as PGID, others join it) would allow a single
-`kill(-pgid, SIGKILL)`. Low priority — current approach works, just verbose.
-
 ## Architecture Notes
 
 ### Completed structural improvements

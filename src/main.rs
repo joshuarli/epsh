@@ -60,7 +60,22 @@ fn main() {
         }
     }
 
-    // Read from stdin
+    // If stdin is a terminal and no -s flag, print usage and exit
+    if unsafe { libc::isatty(0) } != 0 {
+        eprintln!("epsh — embeddable POSIX shell");
+        eprintln!();
+        eprintln!("usage: epsh [-e] [-u] [-x] [-c command] [script [args...]]");
+        eprintln!();
+        eprintln!("  -c command   execute command string");
+        eprintln!("  -e           exit on error (set -e)");
+        eprintln!("  -u           error on unset variables (set -u)");
+        eprintln!("  -x           print commands before execution (set -x)");
+        eprintln!("  script       execute script file");
+        eprintln!("  (no args)    read script from stdin (pipe)");
+        std::process::exit(0);
+    }
+
+    // Read from stdin (pipe)
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("epsh: {e}");
