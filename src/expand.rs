@@ -52,6 +52,74 @@ pub fn expand_word_to_fields(
     Ok(result)
 }
 
+/// Expand word parts into a fnmatch-ready pattern string.
+/// Like expand_word_to_string but escapes glob metacharacters (* ? [ ])
+/// within quoted regions (SingleQuoted, DoubleQuoted).
+/// Used for: ${var%pattern}, ${var#pattern}, case patterns.
+pub fn expand_pattern(
+    parts: &[WordPart],
+    vars: &mut Variables,
+    exit_status: ExitStatus,
+    shell_pid: u32,
+    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+) -> crate::error::Result<String> {
+    let mut result = String::new();
+    for part in parts {
+        match part {
+            WordPart::Literal(s) => {
+                // Unquoted literal — glob chars are active
+                result.push_str(s);
+            }
+            WordPart::SingleQuoted(s) => {
+                // Single-quoted — escape glob chars for fnmatch
+                for c in s.chars() {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                        result.push('\\');
+                    }
+                    result.push(c);
+                }
+            }
+            WordPart::DoubleQuoted(inner) => {
+                // Double-quoted — expand inner parts but escape glob chars
+                let inner_expanded = expand_word_parts_inner(
+                    inner, vars, exit_status, shell_pid, true, cmd_subst, false,
+                )?;
+                let text: String = inner_expanded.into_iter().map(|f| f.value).collect();
+                for c in text.chars() {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                        result.push('\\');
+                    }
+                    result.push(c);
+                }
+            }
+            WordPart::Param(param) => {
+                // Parameter expansion in pattern — value is literal (escape globs)
+                let value = expand_param(param, vars, exit_status, shell_pid, cmd_subst)?;
+                for c in value.chars() {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                        result.push('\\');
+                    }
+                    result.push(c);
+                }
+            }
+            _ => {
+                // Other parts (CmdSubst, Arith, etc.) — expand and escape
+                let frags = expand_word_parts_inner(
+                    std::slice::from_ref(part), vars, exit_status, shell_pid, true, cmd_subst, false,
+                )?;
+                let text: String = frags.into_iter().map(|f| f.value).collect();
+                for c in text.chars() {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                        result.push('\\');
+                    }
+                    result.push(c);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Expand a Word to a single string (no field splitting or globbing).
 /// Used for: here-doc bodies, assignment values, case words.
 pub fn expand_word_to_string(
@@ -506,22 +574,22 @@ fn expand_param(
         }
         ParamOp::TrimSuffixSmall(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_param_word(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
             Ok(trim_suffix(&val, &pat, false))
         }
         ParamOp::TrimSuffixLarge(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_param_word(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
             Ok(trim_suffix(&val, &pat, true))
         }
         ParamOp::TrimPrefixSmall(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_param_word(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
             Ok(trim_prefix(&val, &pat, false))
         }
         ParamOp::TrimPrefixLarge(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_param_word(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
             Ok(trim_prefix(&val, &pat, true))
         }
     }
@@ -643,7 +711,7 @@ fn field_split(fragments: &[ExpandedWord], ifs: &str) -> Vec<String> {
 /// Remove backslash escapes before glob metacharacters.
 /// These were preserved by the lexer for fnmatch/glob, but need stripping
 /// for normal word expansion (POSIX quote removal).
-fn remove_glob_escapes(s: &str) -> String {
+pub fn remove_glob_escapes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;

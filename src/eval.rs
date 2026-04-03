@@ -175,6 +175,24 @@ impl Shell {
         )
     }
 
+    /// Expand word parts into a fnmatch-ready pattern string.
+    /// Glob chars from quoted regions are escaped.
+    pub(crate) fn expand_pattern(&mut self, word: &Word) -> crate::error::Result<String> {
+        let self_ptr = self as *mut Shell;
+        let mut cmd_fn = |cmd: &Command| -> String {
+            let shell = unsafe { &mut *self_ptr };
+            shell.command_subst(cmd).unwrap_or_default()
+        };
+        let mut cmd_subst: Option<&mut dyn FnMut(&Command) -> String> = Some(&mut cmd_fn);
+        expand::expand_pattern(
+            &word.parts,
+            &mut self.vars,
+            self.exit_status,
+            self.pid,
+            &mut cmd_subst,
+        )
+    }
+
     /// Evaluate a command node, returning its exit status.
     pub fn eval_command(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
         let status = self.eval_command_inner(cmd)?;
@@ -418,11 +436,11 @@ impl Shell {
             }
 
             Command::Case { word, arms, .. } => {
-                let expanded = self.expand_string(word)?;
+                let expanded = expand::remove_glob_escapes(&self.expand_string(word)?);
 
                 for arm in arms {
                     for pattern in &arm.patterns {
-                        let pat = self.expand_string(pattern)?;
+                        let pat = self.expand_pattern(pattern)?;
                         if glob::fnmatch(&pat, &expanded) {
                             if let Some(ref body) = arm.body {
                                 return self.eval_command(body);
