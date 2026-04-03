@@ -46,6 +46,13 @@ use crate::parser::Parser;
 use crate::sys;
 use crate::var::Variables;
 
+/// Callback for external command execution.
+///
+/// Receives expanded args (args[0] is the command name) and prefix assignment
+/// environment pairs. Redirections are already applied to fds before the
+/// handler is called. Return the exit status of the command.
+pub type ExternalHandler = Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus>>;
+
 /// A POSIX shell interpreter instance.
 ///
 /// Each `Shell` maintains its own variable scope, working directory, function
@@ -104,6 +111,9 @@ pub struct Shell {
     pub(crate) child_pids: Vec<i32>,
     /// Optional execution deadline. When exceeded, shell aborts with TimedOut.
     timeout: Option<std::time::Instant>,
+    /// Optional callback that replaces eval_external for spawning processes.
+    /// Lets embedders control process creation (job control, sandboxing, etc.).
+    external_handler: Option<ExternalHandler>,
 }
 
 /// Shell option flags (`set -e`, `set -u`, etc.).
@@ -117,6 +127,8 @@ pub struct ShellOpts {
     pub xtrace: bool,
     /// -o pipefail: return highest nonzero status from any pipeline stage
     pub pipefail: bool,
+    /// Interactive mode: tcsetpgrp for terminal control, WUNTRACED for job control.
+    pub interactive: bool,
 }
 
 impl expand::ShellExpand for Shell {
@@ -140,11 +152,13 @@ pub struct ShellBuilder {
     nounset: bool,
     xtrace: bool,
     pipefail: bool,
+    interactive: bool,
     cancel: Option<Arc<AtomicBool>>,
     stdout_sink: Option<Arc<Mutex<dyn Write + Send>>>,
     stderr_sink: Option<Arc<Mutex<dyn Write + Send>>>,
     timeout: Option<std::time::Duration>,
     env_clear: bool,
+    external_handler: Option<ExternalHandler>,
 }
 
 impl Default for ShellBuilder {
@@ -159,11 +173,13 @@ impl ShellBuilder {
             nounset: false,
             xtrace: false,
             pipefail: false,
+            interactive: false,
             cancel: None,
             stdout_sink: None,
             stderr_sink: None,
             timeout: None,
             env_clear: false,
+            external_handler: None,
         }
     }
 
@@ -172,12 +188,16 @@ impl ShellBuilder {
     pub fn nounset(mut self, v: bool) -> Self { self.nounset = v; self }
     pub fn xtrace(mut self, v: bool) -> Self { self.xtrace = v; self }
     pub fn pipefail(mut self, v: bool) -> Self { self.pipefail = v; self }
+    /// Enable interactive mode (tcsetpgrp, WUNTRACED for job control).
+    pub fn interactive(mut self, v: bool) -> Self { self.interactive = v; self }
     pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self { self.cancel = Some(flag); self }
     pub fn stdout_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stdout_sink = Some(sink); self }
     pub fn stderr_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stderr_sink = Some(sink); self }
     pub fn timeout(mut self, duration: std::time::Duration) -> Self { self.timeout = Some(duration); self }
     /// Don't inherit process environment variables.
     pub fn env_clear(mut self) -> Self { self.env_clear = true; self }
+    /// Set a callback for external command execution.
+    pub fn external_handler(mut self, handler: ExternalHandler) -> Self { self.external_handler = Some(handler); self }
 
     pub fn build(self) -> Shell {
         let vars = if self.env_clear {
@@ -199,6 +219,7 @@ impl ShellBuilder {
                 nounset: self.nounset,
                 xtrace: self.xtrace,
                 pipefail: self.pipefail,
+                interactive: self.interactive,
             },
             traps: HashMap::new(),
             tested: false,
@@ -209,6 +230,7 @@ impl ShellBuilder {
             stderr_sink: self.stderr_sink,
             child_pids: Vec::new(),
             timeout: self.timeout.map(|d| std::time::Instant::now() + d),
+            external_handler: self.external_handler,
         }
     }
 }
@@ -244,6 +266,7 @@ impl Shell {
             stderr_sink: None,
             child_pids: Vec::new(),
             timeout: None,
+            external_handler: None,
         }
     }
 
@@ -321,12 +344,24 @@ impl Shell {
 
     /// Wait for a child process, polling the cancel flag.
     /// On cancellation, kills the child's process group and returns Cancelled.
+    /// In interactive mode, uses WUNTRACED to detect stopped processes.
+    /// `pgid` is the process group (for Stopped reporting); 0 means use pid.
     fn wait_child(&mut self, pid: i32) -> crate::error::Result<ExitStatus> {
+        self.wait_child_pgid(pid, pid)
+    }
+
+    fn wait_child_pgid(&mut self, pid: i32, pgid: i32) -> crate::error::Result<ExitStatus> {
+        let wuntraced = if self.opts.interactive { libc::WUNTRACED } else { 0 };
+
         // If no cancel flag or timeout, just block
         if self.cancel.is_none() && self.timeout.is_none() {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            unsafe { sys::waitpid(pid, &mut status, 0); }
+            unsafe { sys::waitpid(pid, &mut status, wuntraced); }
+            if libc::WIFSTOPPED(status) {
+                // Don't remove from child_pids — process is still alive
+                return Err(ShellError::Stopped { pid, pgid });
+            }
             self.child_pids.retain(|&p| p != pid);
             return Ok(ExitStatus::from_wait(status));
         }
@@ -335,8 +370,11 @@ impl Shell {
         loop {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG) };
+            let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG | wuntraced) };
             if ret > 0 {
+                if libc::WIFSTOPPED(status) {
+                    return Err(ShellError::Stopped { pid, pgid });
+                }
                 self.child_pids.retain(|&p| p != pid);
                 return Ok(ExitStatus::from_wait(status));
             }
@@ -372,6 +410,17 @@ impl Shell {
     /// Build the xtrace prefix string ($PS4, default "+ ").
     fn xtrace_prefix(&self) -> String {
         self.vars.get("PS4").unwrap_or("+ ").to_string()
+    }
+
+    /// Set a callback that replaces the default external command execution.
+    ///
+    /// When set, the handler is called instead of `eval_external` for commands
+    /// that are not builtins or functions. Redirections are already applied to
+    /// fds before the handler runs. The handler receives:
+    /// - `args`: expanded arguments (args[0] is the command name)
+    /// - `env`: prefix assignment pairs (`FOO=bar cmd` → `[("FOO", "bar")]`)
+    pub fn set_external_handler(&mut self, handler: ExternalHandler) {
+        self.external_handler = Some(handler);
     }
 
     /// Set the shell's working directory.
@@ -848,6 +897,15 @@ impl Shell {
             } else if let Some(func_body) = self.functions.get(cmd_name).cloned() {
                 self.ev_exit = false; // function body may have multiple commands
                 self.eval_function(&func_body, &expanded_args, assigns, &[], span)
+            } else if self.external_handler.is_some() {
+                // Build prefix assignment env pairs for the handler
+                let mut env_pairs = Vec::new();
+                for assign in assigns {
+                    let value = self.expand_string(&assign.value)?;
+                    env_pairs.push((assign.name.clone(), value));
+                }
+                let handler = self.external_handler.as_mut().unwrap();
+                handler(&expanded_args, &env_pairs)
             } else {
                 self.eval_external(&expanded_args, assigns, &[], span)
             };
@@ -1111,11 +1169,17 @@ impl Shell {
             }
         }
 
+        // Interactive mode: give the pipeline the terminal
+        if self.opts.interactive && pgid > 0 {
+            // SAFETY: pgid is a valid process group from setpgid; fd 0 is stdin.
+            unsafe { libc::tcsetpgrp(0, pgid); }
+        }
+
         // Wait for all children, checking cancel between stages
         let mut last_status = ExitStatus::SUCCESS;
         let mut pipefail_status = ExitStatus::SUCCESS;
         for (i, &pid) in children.iter().enumerate() {
-            match self.wait_child(pid) {
+            match self.wait_child_pgid(pid, pgid) {
                 Ok(stage_status) => {
                     if !stage_status.success() {
                         pipefail_status = stage_status;
@@ -1124,12 +1188,32 @@ impl Shell {
                         last_status = stage_status;
                     }
                 }
+                Err(ShellError::Stopped { pid: _, pgid: _ }) if self.opts.interactive => {
+                    // Reclaim terminal before propagating
+                    // SAFETY: getpgrp() and tcsetpgrp are always safe with valid fd.
+                    unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                    return Err(ShellError::Stopped { pid: children[children.len() - 1], pgid });
+                }
                 Err(e @ (ShellError::Cancelled | ShellError::TimedOut)) => {
+                    if self.opts.interactive {
+                        unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                    }
                     self.kill_children();
                     return Err(e);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if self.opts.interactive {
+                        unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                    }
+                    return Err(e);
+                }
             }
+        }
+
+        // Interactive mode: reclaim the terminal
+        if self.opts.interactive && pgid > 0 {
+            // SAFETY: getpgrp() returns our process group; fd 0 is stdin.
+            unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
         }
 
         if self.opts.pipefail && !pipefail_status.success() {

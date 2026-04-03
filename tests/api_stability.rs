@@ -40,17 +40,22 @@ fn shell_builder_methods() {
     // Every builder method returns Self for chaining
     let cancel = Arc::new(AtomicBool::new(false));
     let sink: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let handler: eval::ExternalHandler = Box::new(|_args, _env| {
+        Ok(error::ExitStatus::SUCCESS)
+    });
     let _shell = eval::Shell::builder()
         .cwd(PathBuf::from("/"))
         .errexit(true)
         .nounset(true)
         .xtrace(true)
         .pipefail(true)
+        .interactive(true)
         .cancel_flag(cancel)
         .stdout_sink(sink.clone())
         .stderr_sink(sink)
         .timeout(Duration::from_secs(1))
         .env_clear()
+        .external_handler(handler)
         .build();
 }
 
@@ -74,6 +79,10 @@ fn shell_public_methods() {
     shell.set_cancel_flag(Arc::new(AtomicBool::new(false)));
     shell.set_stdout_sink(Arc::new(Mutex::new(Vec::<u8>::new())));
     shell.set_stderr_sink(Arc::new(Mutex::new(Vec::<u8>::new())));
+    shell.set_external_handler(Box::new(|_args, _env| Ok(error::ExitStatus::SUCCESS)));
+
+    // ShellOpts fields
+    shell.opts.interactive = true;
 
     // resolve_path
     let _p: PathBuf = shell.resolve_path("relative");
@@ -150,6 +159,7 @@ fn shell_error_api() {
     };
     let cancelled = error::ShellError::Cancelled;
     let timed_out = error::ShellError::TimedOut;
+    let stopped = error::ShellError::Stopped { pid: 1234, pgid: 1234 };
 
     // Helper methods
     assert!(cancelled.is_cancelled());
@@ -158,6 +168,8 @@ fn shell_error_api() {
     assert!(timed_out.is_timed_out());
     assert!(!timed_out.is_cancelled());
     assert!(timed_out.is_interrupted());
+    assert!(stopped.is_stopped());
+    assert!(!stopped.is_interrupted());
 
     let exit = error::ShellError::Exit(error::ExitStatus::from(42));
     assert_eq!(exit.exit_code().unwrap().code(), 42);

@@ -312,6 +312,65 @@ mod builtin_list {
     }
 }
 
+mod external_handler {
+    use super::*;
+    use epsh::eval::ExternalHandler;
+
+    #[test]
+    fn handler_receives_args() {
+        let captured_args = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let args_ref = captured_args.clone();
+        let handler: ExternalHandler = Box::new(move |args, _env| {
+            args_ref.lock().unwrap().push(args.to_vec());
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        shell.run_program(&parse("nonexistent_cmd foo bar"));
+        let calls = captured_args.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], vec!["nonexistent_cmd", "foo", "bar"]);
+    }
+
+    #[test]
+    fn handler_receives_env_pairs() {
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, String)>>::new()));
+        let env_ref = captured_env.clone();
+        let handler: ExternalHandler = Box::new(move |_args, env| {
+            env_ref.lock().unwrap().push(env.to_vec());
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        shell.run_program(&parse("FOO=bar BAZ=qux mycmd"));
+        let calls = captured_env.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains(&("FOO".into(), "bar".into())));
+        assert!(calls[0].contains(&("BAZ".into(), "qux".into())));
+    }
+
+    #[test]
+    fn handler_not_called_for_builtins() {
+        let call_count = Arc::new(Mutex::new(0));
+        let count_ref = call_count.clone();
+        let handler: ExternalHandler = Box::new(move |_args, _env| {
+            *count_ref.lock().unwrap() += 1;
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        shell.run_program(&parse("echo hello; true; false; : ; pwd"));
+        assert_eq!(*call_count.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn handler_exit_status_propagates() {
+        let handler: ExternalHandler = Box::new(|_args, _env| {
+            Ok(ExitStatus::from(42))
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        let status = shell.run_program(&parse("mycmd"));
+        assert_eq!(status.code(), 42);
+    }
+}
+
 mod variables {
     use super::*;
 

@@ -51,6 +51,15 @@ pub enum ShellError {
     Cancelled,
     /// Execution exceeded the configured timeout.
     TimedOut,
+    /// A foreground process was stopped (SIGTSTP/SIGSTOP).
+    /// Only produced in interactive mode. The embedder should save the job
+    /// and resume it later with `kill(pgid, SIGCONT)` + `tcsetpgrp`.
+    Stopped {
+        /// PID of the stopped process.
+        pid: i32,
+        /// Process group ID (for resuming the entire pipeline).
+        pgid: i32,
+    },
 }
 
 impl ShellError {
@@ -67,6 +76,11 @@ impl ShellError {
     /// True if this is a timeout.
     pub fn is_timed_out(&self) -> bool {
         matches!(self, ShellError::TimedOut)
+    }
+
+    /// True if a foreground process was stopped (interactive mode).
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, ShellError::Stopped { .. })
     }
 
     /// If this is an Exit or Return, return the exit code.
@@ -91,6 +105,7 @@ impl fmt::Display for ShellError {
             ShellError::Runtime { msg, span } => write!(f, "{span}: {msg}"),
             ShellError::Cancelled => write!(f, "cancelled"),
             ShellError::TimedOut => write!(f, "timed out"),
+            ShellError::Stopped { pid, pgid } => write!(f, "stopped (pid={pid}, pgid={pgid})"),
         }
     }
 }
