@@ -689,9 +689,11 @@ impl Shell {
         redirs: &[Redir],
         _span: Span,
     ) -> crate::error::Result<ExitStatus> {
-        // Save and set positional parameters
-        let saved_positional = self.vars.positional.clone();
-        self.vars.positional = args[1..].to_vec();
+        // Save and set positional parameters (take avoids clone)
+        let saved_positional = std::mem::replace(
+            &mut self.vars.positional,
+            args[1..].to_vec(),
+        );
 
         // Push scope for local variables
         self.vars.push_scope();
@@ -879,6 +881,12 @@ impl Shell {
             unsafe {
                 let pid = sys::fork();
                 if pid < 0 {
+                    // Fork failed — clean up pipes and kill already-forked children
+                    for &(r, w) in &pipes {
+                        sys::close(r);
+                        sys::close(w);
+                    }
+                    self.kill_children();
                     return Err(ShellError::Io(std::io::Error::last_os_error()));
                 }
 
