@@ -6,6 +6,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ast::*;
+
+/// Builtins that don't modify shell state — safe to run in-process for
+/// command substitution without forking.
+fn is_pure_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type" | "test" | "["
+    )
+}
 use crate::error::{ExitStatus, ShellError, Span};
 use crate::expand;
 use crate::glob;
@@ -1069,6 +1078,44 @@ impl Shell {
 
     /// Execute a command substitution and return its output.
     pub fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
+        // In-process comsub for pure builtins: capture output without forking.
+        // Pure builtins (echo, printf, true, false, :, pwd, type, test/[) don't
+        // modify shell state, so running them in-process is safe and avoids the
+        // fork+pipe+waitpid overhead entirely.
+        if let Command::Simple { assigns, args, redirs, span } = cmd
+            && assigns.is_empty() && redirs.is_empty() && !args.is_empty()
+        {
+            let mut expanded = Vec::new();
+            let expand_ok = (|| -> crate::error::Result<()> {
+                for a in args {
+                    expanded.extend(self.expand_fields(a)?);
+                }
+                Ok(())
+            })();
+            if expand_ok.is_ok() && !expanded.is_empty()
+                && is_pure_builtin(&expanded[0])
+            {
+                // Capture output to buffer instead of forking
+                let saved_sink = self.stdout_sink.take();
+                let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+                self.stdout_sink = Some(buf.clone());
+                let status = self.try_builtin(
+                    &expanded[0], &expanded, &[], &[], *span,
+                );
+                self.stdout_sink = saved_sink;
+                if let Ok(Some(s)) = status {
+                    self.exit_status = s;
+                    let captured = buf.lock().unwrap();
+                    let mut output = crate::encoding::bytes_to_str(&captured);
+                    while output.ends_with('\n') {
+                        output.pop();
+                    }
+                    return Ok(output);
+                }
+                // Fallback: not a builtin after all, continue to fork path
+            }
+        }
+
         // $(<file) optimization: read file directly without forking
         if let Command::Simple { assigns, args, redirs, .. } = cmd
             && assigns.is_empty() && args.is_empty() && redirs.len() == 1
