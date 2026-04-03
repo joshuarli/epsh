@@ -43,6 +43,7 @@ impl Shell {
                         self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
                     })?;
+                    // SAFETY: file fd is valid from File::open; target_fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), target_fd);
                     }
@@ -54,6 +55,7 @@ impl Shell {
                         self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
                     })?;
+                    // SAFETY: file fd is valid from File::create; target_fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), target_fd);
                     }
@@ -70,6 +72,7 @@ impl Shell {
                             self.err_msg(&format!("{filename}: {e}"));
                             ShellError::Io(e)
                         })?;
+                    // SAFETY: file fd is valid from OpenOptions::open; target_fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), target_fd);
                     }
@@ -87,6 +90,7 @@ impl Shell {
                             self.err_msg(&format!("{filename}: {e}"));
                             ShellError::Io(e)
                         })?;
+                    // SAFETY: file fd is valid from OpenOptions::open; target_fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), target_fd);
                     }
@@ -94,10 +98,12 @@ impl Shell {
                 RedirKind::DupInput(word) | RedirKind::DupOutput(word) => {
                     let fd_str = self.expand_string(word)?;
                     if fd_str == "-" {
+                        // SAFETY: target_fd is a valid fd number from the redirect syntax.
                         unsafe {
                             sys::close(target_fd);
                         }
                     } else if let Ok(source_fd) = fd_str.parse::<i32>() {
+                        // SAFETY: source_fd is user-specified (may fail at OS level); target_fd is from redirect syntax.
                         unsafe {
                             sys::dup2(source_fd, target_fd);
                         }
@@ -110,9 +116,11 @@ impl Shell {
                 }
                 RedirKind::HereDoc(body) | RedirKind::HereDocStrip(body) => {
                     let mut fds = [0i32; 2];
+                    // SAFETY: fds is a valid 2-element array for pipe() to write into.
                     unsafe {
                         sys::pipe(fds.as_mut_ptr());
                     }
+                    // SAFETY: fds[1] is a valid fd just returned by pipe().
                     let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
                     let read_fd = fds[0];
 
@@ -126,6 +134,7 @@ impl Shell {
                     let _ = (&write_end).write_all(&crate::encoding::str_to_bytes(&expanded));
                     drop(write_end);
 
+                    // SAFETY: read_fd is valid from pipe(); target_fd is the redirect target.
                     unsafe {
                         sys::dup2(read_fd, target_fd);
                         sys::close(read_fd);
@@ -141,6 +150,7 @@ impl Shell {
     pub(crate) fn restore_redirections(&self, saved: Vec<SavedFd>) {
         for s in saved.into_iter().rev() {
             if let Some(copy) = s.saved_copy {
+                // SAFETY: copy is a valid fd from fcntl_dupfd_cloexec; target_fd is the original fd being restored.
                 unsafe {
                     sys::dup2(copy, s.target_fd);
                     sys::close(copy);

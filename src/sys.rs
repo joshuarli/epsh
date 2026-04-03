@@ -6,6 +6,7 @@ pub use libc::{close, dup2, execvp, fork, getuid, isatty, pipe, read, umask, wai
 use std::os::unix::io::RawFd;
 
 pub fn fcntl_dupfd_cloexec(fd: RawFd, min_fd: RawFd) -> i32 {
+    // SAFETY: Thin wrapper around libc fcntl; fd validity is caller's responsibility.
     unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, min_fd) }
 }
 
@@ -29,5 +30,6 @@ pub fn exit_child(status: crate::error::ExitStatus) -> ! {
         let mut out = std::io::stdout().lock();
         let _ = std::io::Write::flush(&mut out);
     }
+    // SAFETY: _exit is always safe to call; it terminates the process immediately.
     unsafe { libc::_exit(status.code()) }
 }

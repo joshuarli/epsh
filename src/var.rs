@@ -131,6 +131,7 @@ impl Variables {
 
         // Sync to process environment if exported
         if entry.flags.has(VarFlags::EXPORT) {
+            // SAFETY: epsh is single-threaded; no concurrent env access.
             unsafe { env::set_var(name, value) };
         }
 
@@ -158,6 +159,7 @@ impl Variables {
         entry.int_cache = Some(value);
 
         if entry.flags.has(VarFlags::EXPORT) {
+            // SAFETY: epsh is single-threaded; no concurrent env access.
             unsafe { env::set_var(name, &s) };
         }
 
@@ -172,6 +174,7 @@ impl Variables {
             return Err(format!("{name}: readonly variable"));
         }
         self.vars.remove(name);
+        // SAFETY: epsh is single-threaded; no concurrent env access.
         unsafe { env::remove_var(name) };
         Ok(())
     }
@@ -182,6 +185,7 @@ impl Variables {
             .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::EXPORT);
         if let Some(ref value) = entry.value {
+            // SAFETY: epsh is single-threaded; no concurrent env access.
             unsafe { env::set_var(name, value) };
         }
     }

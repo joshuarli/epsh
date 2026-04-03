@@ -16,31 +16,66 @@ impl fmt::Display for Span {
 
 /// Shell errors and control flow signals.
 ///
-/// Control flow (Exit, Return, Break, Continue) propagates up the call stack
-/// via Result, replacing dash/posh's setjmp/longjmp. Execution errors carry
-/// source positions for diagnostics.
+/// This enum serves two purposes:
+/// - **Errors**: `Syntax`, `CommandNotFound`, `Io`, `Runtime`, `Cancelled`, `TimedOut`
+/// - **Control flow**: `Exit`, `Return`, `Break`, `Continue`
+///
+/// Control flow variants propagate up the call stack via `Result`, replacing
+/// the setjmp/longjmp mechanism used by dash and posh.
+///
+/// # For embedders
+///
+/// After calling [`Shell::run_program`](crate::eval::Shell::run_program), errors are
+/// already handled internally — you get an [`ExitStatus`] back. `ShellError` is only
+/// relevant if you call lower-level methods like [`Shell::eval_command`](crate::eval::Shell::eval_command)
+/// directly, or if you need to distinguish cancellation from timeout in custom control flow.
 #[derive(Debug)]
 pub enum ShellError {
-    /// `exit [n]` — terminate the shell
+    /// `exit [n]` — terminate the shell.
     Exit(ExitStatus),
-    /// `return [n]` — return from function or dot-script
+    /// `return [n]` — return from function or dot-script.
     Return(ExitStatus),
-    /// `break [n]` — break from n enclosing loops
+    /// `break [n]` — break from n enclosing loops.
     Break(usize),
-    /// `continue [n]` — continue nth enclosing loop
+    /// `continue [n]` — continue nth enclosing loop.
     Continue(usize),
-    /// Syntax error during parsing
+    /// Syntax error during parsing.
     Syntax { msg: String, span: Span },
-    /// Command not found in PATH or builtins
+    /// Command not found in PATH or builtins.
     CommandNotFound(String),
-    /// I/O error (redirections, pipes, file operations)
+    /// I/O error (redirections, pipes, file operations).
     Io(std::io::Error),
-    /// Generic runtime error with position
+    /// Runtime error with source position.
     Runtime { msg: String, span: Span },
-    /// Execution was cancelled via the cancel flag
+    /// Execution was cancelled via the cancel flag.
     Cancelled,
-    /// Execution exceeded the configured timeout
+    /// Execution exceeded the configured timeout.
     TimedOut,
+}
+
+impl ShellError {
+    /// True if execution was interrupted (cancelled or timed out).
+    pub fn is_interrupted(&self) -> bool {
+        matches!(self, ShellError::Cancelled | ShellError::TimedOut)
+    }
+
+    /// True if this is a cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, ShellError::Cancelled)
+    }
+
+    /// True if this is a timeout.
+    pub fn is_timed_out(&self) -> bool {
+        matches!(self, ShellError::TimedOut)
+    }
+
+    /// If this is an Exit or Return, return the exit code.
+    pub fn exit_code(&self) -> Option<ExitStatus> {
+        match self {
+            ShellError::Exit(s) | ShellError::Return(s) => Some(*s),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ShellError {
@@ -75,9 +110,16 @@ impl From<std::io::Error> for ShellError {
     }
 }
 
+/// Alias for `std::result::Result<T, ShellError>`.
 pub type Result<T> = std::result::Result<T, ShellError>;
 
-/// Shell exit status (0-255). Provides type safety over bare i32.
+/// Shell exit status (0-255).
+///
+/// Wraps an `i32` with type-safe constructors and accessors. Named constants
+/// for common statuses: `SUCCESS` (0), `FAILURE` (1), `MISUSE` (2),
+/// `NOT_FOUND` (127), `NOT_EXECUTABLE` (126).
+///
+/// The inner field is private — use `.code()` to extract, `From<i32>` to construct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExitStatus(i32);
 
@@ -93,21 +135,22 @@ impl ExitStatus {
         self.0
     }
 
+    /// True if the exit code is 0 (success).
     pub fn success(self) -> bool {
         self.0 == 0
     }
 
-    /// Return SUCCESS if the condition is true, FAILURE otherwise.
+    /// Return `SUCCESS` if true, `FAILURE` if false.
     pub fn from_bool(ok: bool) -> Self {
         if ok { Self::SUCCESS } else { Self::FAILURE }
     }
 
-    /// Logical negation: SUCCESS becomes FAILURE and vice versa.
+    /// Logical negation: `SUCCESS` becomes `FAILURE` and vice versa.
     pub fn inverted(self) -> Self {
         Self::from_bool(!self.success())
     }
 
-    /// Create from a process wait status (as returned by waitpid).
+    /// Create from a raw waitpid status (decodes WIFEXITED/WEXITSTATUS/WTERMSIG).
     pub fn from_wait(status: i32) -> Self {
         if crate::sys::wifexited(status) {
             ExitStatus(crate::sys::wexitstatus(status))

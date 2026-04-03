@@ -46,7 +46,28 @@ use crate::parser::Parser;
 use crate::sys;
 use crate::var::Variables;
 
-/// Shell state passed through evaluation.
+/// A POSIX shell interpreter instance.
+///
+/// Each `Shell` maintains its own variable scope, working directory, function
+/// definitions, and options — safe for concurrent use across threads (one Shell
+/// per thread; Shell itself is not Sync).
+///
+/// # Quick start
+/// ```no_run
+/// use epsh::eval::Shell;
+/// let mut shell = Shell::new();
+/// let exit_code = shell.run_script("echo hello");
+/// ```
+///
+/// # Builder pattern
+/// ```no_run
+/// use epsh::eval::Shell;
+/// use std::path::PathBuf;
+/// let mut shell = Shell::builder()
+///     .cwd(PathBuf::from("/project"))
+///     .errexit(true)
+///     .build();
+/// ```
 pub struct Shell {
     pub vars: Variables,
     /// Defined functions: name → AST body
@@ -85,6 +106,7 @@ pub struct Shell {
     timeout: Option<std::time::Instant>,
 }
 
+/// Shell option flags (`set -e`, `set -u`, etc.).
 #[derive(Debug, Default)]
 pub struct ShellOpts {
     /// -e: exit on error
@@ -108,7 +130,10 @@ impl expand::ShellExpand for Shell {
     }
 }
 
-/// Builder for configuring a Shell instance.
+/// Builder for configuring a [`Shell`] instance.
+///
+/// Use [`Shell::builder()`] to start, then chain options, then `.build()`.
+/// All settings have sensible defaults — you only need to set what you want.
 pub struct ShellBuilder {
     cwd: Option<PathBuf>,
     errexit: bool,
@@ -195,10 +220,12 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// Create a [`ShellBuilder`] for configuring a new shell instance.
     pub fn builder() -> ShellBuilder {
         ShellBuilder::new()
     }
 
+    /// Create a new shell with default settings and inherited environment.
     pub fn new() -> Self {
         Shell {
             vars: Variables::new(),
@@ -266,6 +293,7 @@ impl Shell {
                 let _ = w.write_all(&data);
             }
         } else {
+            // SAFETY: fd 1 (stdout) is always valid; data pointer and length are from a live Vec.
             unsafe { sys::write(1, data.as_ptr() as *const _, data.len()); }
         }
     }
@@ -278,6 +306,7 @@ impl Shell {
                 let _ = w.write_all(&data);
             }
         } else {
+            // SAFETY: fd 2 (stderr) is always valid; data pointer and length are from a live Vec.
             unsafe { sys::write(2, data.as_ptr() as *const _, data.len()); }
         }
     }
@@ -296,6 +325,7 @@ impl Shell {
         // If no cancel flag or timeout, just block
         if self.cancel.is_none() && self.timeout.is_none() {
             let mut status = 0i32;
+            // SAFETY: pid is a valid child PID obtained from fork().
             unsafe { sys::waitpid(pid, &mut status, 0); }
             self.child_pids.retain(|&p| p != pid);
             return Ok(ExitStatus::from_wait(status));
@@ -304,6 +334,7 @@ impl Shell {
         // Poll with WNOHANG, checking cancel/timeout between iterations
         loop {
             let mut status = 0i32;
+            // SAFETY: pid is a valid child PID obtained from fork().
             let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG) };
             if ret > 0 {
                 self.child_pids.retain(|&p| p != pid);
@@ -311,7 +342,9 @@ impl Shell {
             }
             if let Err(e) = self.check_cancel() {
                 // Cancel or timeout — kill and reap
+                // SAFETY: pid is a valid child PID; negated for process group kill. SIGKILL is always valid.
                 unsafe { libc::kill(-pid, libc::SIGKILL); }
+                // SAFETY: pid is a valid child PID; reaping after kill.
                 unsafe { sys::waitpid(pid, &mut status, 0); }
                 self.child_pids.retain(|&p| p != pid);
                 return Err(e);
@@ -324,11 +357,13 @@ impl Shell {
     fn kill_children(&mut self) {
         for &pid in &self.child_pids {
             // Kill the process group (negative PID)
+            // SAFETY: pid is a valid child PID from fork(); negated for process group kill.
             unsafe { libc::kill(-pid, libc::SIGKILL); }
         }
         // Reap them
         for &pid in &self.child_pids {
             let mut status = 0i32;
+            // SAFETY: pid is a valid child PID; reaping after kill.
             unsafe { sys::waitpid(pid, &mut status, 0); }
         }
         self.child_pids.clear();
@@ -891,6 +926,8 @@ impl Shell {
         // When ev_exit is set (pipeline child about to _exit), exec directly
         // instead of fork+exec. Mirrors dash's shellexec fast-path.
         if self.ev_exit {
+            // SAFETY: ev_exit is only set in forked children (pipeline/subshell),
+            // which are single-threaded. set_var/set_current_dir are safe here.
             unsafe {
                 for (k, v) in self.vars.exported_env() {
                     std::env::set_var(&k, &v);
@@ -935,6 +972,7 @@ impl Shell {
             Ok(mut child) => {
                 let child_id = child.id() as i32;
                 // Isolate in own process group from parent (allows posix_spawn path)
+                // SAFETY: child_id is a valid PID just returned by spawn().
                 unsafe { libc::setpgid(child_id, child_id); }
                 self.child_pids.push(child_id);
 
@@ -995,6 +1033,7 @@ impl Shell {
         let mut pipes: Vec<(RawFd, RawFd)> = Vec::new();
         for _ in 0..commands.len() - 1 {
             let mut fds = [0i32; 2];
+            // SAFETY: fds is a valid 2-element array for pipe() to write into.
             unsafe {
                 if sys::pipe(fds.as_mut_ptr()) != 0 {
                     return Err(ShellError::Io(std::io::Error::last_os_error()));
@@ -1007,6 +1046,9 @@ impl Shell {
         let mut pgid: i32 = 0; // first child's PID becomes the pipeline's PGID
 
         for (i, cmd) in commands.iter().enumerate() {
+            // SAFETY: Standard POSIX fork/dup2/close/setpgid pattern. Pipe fds are
+            // valid from pipe() above. Child sets up its stdin/stdout from pipe fds
+            // then closes all pipe fds before executing.
             unsafe {
                 let pid = sys::fork();
                 if pid < 0 {
@@ -1062,6 +1104,7 @@ impl Shell {
 
         // Parent: close all pipe fds
         for &(read_fd, write_fd) in &pipes {
+            // SAFETY: fds are valid from pipe() and not yet closed in parent.
             unsafe {
                 sys::close(read_fd);
                 sys::close(write_fd);
@@ -1098,6 +1141,8 @@ impl Shell {
 
     /// Execute a command in a subshell (fork).
     fn eval_in_subshell(&mut self, body: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
+        // SAFETY: Standard POSIX fork pattern. Child isolates into its own
+        // process group, executes the body, then _exit()s. Parent waits.
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -1134,6 +1179,8 @@ impl Shell {
 
     /// Execute a command in the background.
     fn eval_background(&mut self, cmd: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
+        // SAFETY: Standard POSIX fork pattern. Child isolates into its own
+        // process group and runs the command. Parent does not wait (background).
         unsafe {
             let pid = sys::fork();
             if pid < 0 {
@@ -1229,6 +1276,9 @@ impl Shell {
         }
 
         let mut fds = [0i32; 2];
+        // SAFETY: Standard POSIX pipe+fork pattern for command substitution.
+        // Child redirects stdout to write end of pipe, parent reads from read end.
+        // All fds are valid from pipe(). from_raw_fd takes ownership of fds[0].
         unsafe {
             if sys::pipe(fds.as_mut_ptr()) != 0 {
                 return Err(ShellError::Io(std::io::Error::last_os_error()));

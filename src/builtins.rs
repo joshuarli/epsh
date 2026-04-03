@@ -390,6 +390,7 @@ impl Shell {
         let mut got_data = false;
         let mut continued = false;
         loop {
+            // SAFETY: fd 0 (stdin) is valid; buf is a live 1-byte array.
             let n = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
             if n <= 0 {
                 break; // EOF or error
@@ -405,6 +406,7 @@ impl Shell {
             }
             if ch == '\\' && !raw_mode {
                 // Line continuation: peek at next char
+                // SAFETY: fd 0 (stdin) is valid; buf is a live 1-byte array.
                 let n2 = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
                 if n2 <= 0 {
                     line.push('\\');
@@ -504,6 +506,7 @@ impl Shell {
                 RedirKind::Input(word) => {
                     let filename = self.expand_string(word)?;
                     let file = std::fs::File::open(&filename)?;
+                    // SAFETY: file fd is valid from File::open; redir.fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), redir.fd);
                     }
@@ -512,6 +515,7 @@ impl Shell {
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
                     let filename = self.expand_string(word)?;
                     let file = std::fs::File::create(&filename)?;
+                    // SAFETY: file fd is valid from File::create; redir.fd is the redirect target.
                     unsafe {
                         sys::dup2(file.as_raw_fd(), redir.fd);
                     }
@@ -575,6 +579,7 @@ impl Shell {
         // Wait for all background children
         loop {
             let mut status = 0i32;
+            // SAFETY: -1 waits for any child process; standard POSIX usage.
             let pid = unsafe { sys::waitpid(-1, &mut status, 0) };
             if pid <= 0 {
                 break;
@@ -617,6 +622,7 @@ impl Shell {
 
     fn builtin_umask(&self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
+            // SAFETY: umask() is always safe; no invalid arguments possible.
             let mask = unsafe { sys::umask(0) };
             unsafe {
                 sys::umask(mask);
@@ -625,6 +631,7 @@ impl Shell {
             return ExitStatus::SUCCESS;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
+            // SAFETY: umask() is always safe; any mode_t value is valid.
             unsafe {
                 sys::umask(mask as libc::mode_t);
             }
@@ -984,6 +991,8 @@ pub(crate) mod exec {
             .chain(std::iter::once(std::ptr::null()))
             .collect();
 
+        // SAFETY: c_cmd and c_argv are valid null-terminated CStrings; c_argv is null-terminated.
+        // execvp only returns on error. The CString/Vec locals are kept alive for the call.
         unsafe {
             crate::sys::execvp(c_cmd.as_ptr(), c_argv.as_ptr());
         }

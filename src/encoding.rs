@@ -26,7 +26,7 @@ pub fn bytes_to_str(bytes: &[u8]) -> String {
                 let valid_up_to = e.valid_up_to();
                 // Push the valid prefix
                 if valid_up_to > 0 {
-                    // Safety: from_utf8 confirmed these bytes are valid
+                    // SAFETY: from_utf8 confirmed these bytes are valid
                     result.push_str(unsafe {
                         std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to])
                     });
