@@ -1,6 +1,12 @@
 use crate::ast::{ParamExpr, ParamOp, WordPart};
 use crate::error::{ShellError, Span};
 
+/// Escape marker for backslash-escaped characters in unquoted context.
+/// Stored in Literal text so that fnmatch/glob can see escapes inside
+/// brackets (e.g. `[\!ab]`). Quote removal strips CTLESC for non-pattern
+/// contexts. Uses a Unicode noncharacter that won't appear in normal text.
+pub const CTLESC: char = '\u{FFFE}';
+
 /// Token types produced by the lexer.
 #[derive(Debug, Clone)]
 pub enum Token {
@@ -520,13 +526,11 @@ impl Lexer {
                                 if ctx == WordCtx::Brace && escaped == '}' {
                                     // Inside ${...}, \} always escapes }
                                     literal.push(escaped);
-                                } else if ctx == WordCtx::Word
-                                    && matches!(escaped, '*' | '?' | '[' | ']')
-                                {
-                                    // Preserve \ for glob chars so fnmatch can
-                                    // distinguish \? (literal) from ? (glob).
-                                    // Quote removal strips these during normal expansion.
-                                    literal.push('\\');
+                                } else if ctx == WordCtx::Word {
+                                    // Mark escaped chars with CTLESC so fnmatch/glob
+                                    // can see escapes inside brackets (e.g. [\!ab]).
+                                    // Quote removal strips CTLESC for non-pattern contexts.
+                                    literal.push(CTLESC);
                                     literal.push(escaped);
                                 } else {
                                     literal.push(escaped);
@@ -1522,12 +1526,24 @@ fn try_split_assignment(parts: &[WordPart]) -> Option<(String, Vec<WordPart>)> {
 use crate::parser::{coalesce_literals, parse_cmdsubst_content};
 
 /// Extract the plain text from word parts (for heredoc delimiter, func name, for-var, etc.).
-/// Only extracts from Literal and SingleQuoted parts.
+/// Only extracts from Literal and SingleQuoted parts. Strips CTLESC markers.
 pub fn parts_to_text(parts: &[WordPart]) -> String {
     let mut s = String::new();
     for part in parts {
         match part {
-            WordPart::Literal(t) => s.push_str(t),
+            WordPart::Literal(t) => {
+                // Strip CTLESC markers — they're escape metadata, not content
+                let mut chars = t.chars();
+                while let Some(c) = chars.next() {
+                    if c == CTLESC {
+                        if let Some(next) = chars.next() {
+                            s.push(next);
+                        }
+                    } else {
+                        s.push(c);
+                    }
+                }
+            }
             WordPart::SingleQuoted(t) => s.push_str(t),
             WordPart::DoubleQuoted(inner) => {
                 s.push_str(&parts_to_text(inner));

@@ -72,18 +72,19 @@ pub fn expand_pattern(
     parts: &[WordPart],
     sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<String> {
+    use crate::lexer::CTLESC;
     let mut result = String::new();
     for part in parts {
         match part {
             WordPart::Literal(s) => {
-                // Unquoted literal — glob chars are active
+                // Unquoted literal — glob chars are active, CTLESC preserved
                 result.push_str(s);
             }
             WordPart::SingleQuoted(s) => {
                 // Single-quoted — escape glob chars for fnmatch
                 for c in s.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
-                        result.push('\\');
+                        result.push(CTLESC);
                     }
                     result.push(c);
                 }
@@ -96,7 +97,7 @@ pub fn expand_pattern(
                 let text: String = inner_expanded.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
-                        result.push('\\');
+                        result.push(CTLESC);
                     }
                     result.push(c);
                 }
@@ -106,7 +107,7 @@ pub fn expand_pattern(
                 let value = expand_param(param, sh)?;
                 for c in value.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
-                        result.push('\\');
+                        result.push(CTLESC);
                     }
                     result.push(c);
                 }
@@ -119,7 +120,7 @@ pub fn expand_pattern(
                 let text: String = frags.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
-                        result.push('\\');
+                        result.push(CTLESC);
                     }
                     result.push(c);
                 }
@@ -694,12 +695,13 @@ fn field_split(fragments: &[ExpandedWord], ifs: &str) -> Vec<String> {
 /// These were preserved by the lexer for fnmatch/glob, but need stripping
 /// for normal word expansion (POSIX quote removal).
 pub fn remove_glob_escapes(s: &str) -> String {
+    use crate::lexer::CTLESC;
     let mut result = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '*' | '?' | '[' | ']') {
-            // Skip the backslash, keep the char
+        if chars[i] == CTLESC && i + 1 < chars.len() {
+            // Strip CTLESC, keep the escaped char
             i += 1;
             result.push(chars[i]);
         } else {

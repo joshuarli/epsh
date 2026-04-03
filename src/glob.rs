@@ -100,12 +100,13 @@ fn glob_recursive(fs_dir: &Path, display_dir: &Path, components: &[&str], result
 }
 
 /// Check if a string contains glob metacharacters.
+/// CTLESC- and backslash-preceded chars are escaped (not glob-active).
 pub fn has_glob_chars(s: &str) -> bool {
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
             '*' | '?' | '[' => return true,
-            '\\' => {
+            c if c == crate::lexer::CTLESC || c == '\\' => {
                 chars.next(); // skip escaped char
             }
             _ => {}
@@ -120,6 +121,26 @@ pub fn fnmatch(pattern: &str, string: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = string.chars().collect();
     fnmatch_inner(&pat, 0, &s, 0)
+}
+
+/// Check if a pattern char is an escape marker (CTLESC or backslash).
+fn is_escape(c: char) -> bool {
+    c == '\\' || c == crate::lexer::CTLESC
+}
+
+/// Read one char from pattern, handling escape markers (CTLESC and \).
+/// Returns the literal char and advances pi.
+fn read_bracket_char(pat: &[char], pi: &mut usize) -> char {
+    if is_escape(pat[*pi]) && *pi + 1 < pat.len() {
+        *pi += 1;
+        let c = pat[*pi];
+        *pi += 1;
+        c
+    } else {
+        let c = pat[*pi];
+        *pi += 1;
+        c
+    }
 }
 
 fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
@@ -137,11 +158,9 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                 while pi < pat.len() && pat[pi] == '*' {
                     pi += 1;
                 }
-                // * at end matches everything
                 if pi >= pat.len() {
                     return true;
                 }
-                // Try matching the rest from each position
                 for i in si..=s.len() {
                     if fnmatch_inner(pat, pi, s, i) {
                         return true;
@@ -168,32 +187,12 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                         break;
                     }
 
-                    // Backslash escapes inside brackets
-                    let c1 = if pat[pi] == '\\' && pi + 1 < pat.len() {
-                        pi += 1;
-                        let c = pat[pi];
-                        pi += 1;
-                        c
-                    } else {
-                        let c = pat[pi];
-                        pi += 1;
-                        c
-                    };
+                    let c1 = read_bracket_char(pat, &mut pi);
 
                     // Range: c1-c2 (but not if - is at end before ])
                     if pi + 1 < pat.len() && pat[pi] == '-' && pat[pi + 1] != ']' {
                         pi += 1; // skip -
-                        // Handle backslash escape in range end
-                        let c2 = if pat[pi] == '\\' && pi + 1 < pat.len() {
-                            pi += 1;
-                            let c = pat[pi];
-                            pi += 1;
-                            c
-                        } else {
-                            let c = pat[pi];
-                            pi += 1;
-                            c
-                        };
+                        let c2 = read_bracket_char(pat, &mut pi);
                         if s[si] >= c1 && s[si] <= c2 {
                             matched = true;
                         }
@@ -210,7 +209,8 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                 }
                 si += 1;
             }
-            '\\' => {
+            c if is_escape(c) => {
+                // CTLESC or backslash: next char is literal
                 pi += 1;
                 if pi >= pat.len() {
                     return false;

@@ -8,6 +8,11 @@ pub(crate) fn test_eval(args: &[&str]) -> ExitStatus {
     }
     let mut pos = 0;
     let result = test_or(args, &mut pos);
+    // If there are unconsumed arguments, it's a syntax error
+    if pos < args.len() {
+        eprintln!("test: too many arguments");
+        return ExitStatus::MISUSE;
+    }
     if result { ExitStatus::SUCCESS } else { ExitStatus::FAILURE }
 }
 
