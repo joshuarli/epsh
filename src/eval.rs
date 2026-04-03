@@ -512,15 +512,6 @@ impl Shell {
                 }
             }
         }
-        // Also check lowercase "exit"
-        if let Some(action) = self.traps.remove("exit") {
-            let mut parser = Parser::new(&action);
-            if let Ok(program) = parser.parse() {
-                for cmd in &program.commands {
-                    let _ = self.eval_command(cmd);
-                }
-            }
-        }
     }
 
     /// Set shell arguments ($0, $1, $2, ...).

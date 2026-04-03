@@ -650,16 +650,17 @@ impl Shell {
                     self.write_out(&format!("trap -- '{}' {}\n", action, sig));
                 }
             } else {
-                self.traps.remove(sig.as_str());
+                self.traps.remove(&sig.to_uppercase());
             }
             return ExitStatus::SUCCESS;
         }
         let action = &args[offset];
         for sig_name in &args[offset + 1..] {
+            let normalized = sig_name.to_uppercase();
             if action == "-" {
-                self.traps.remove(sig_name.as_str());
+                self.traps.remove(&normalized);
             } else {
-                self.traps.insert(sig_name.clone(), action.clone());
+                self.traps.insert(normalized, action.clone());
             }
         }
         ExitStatus::SUCCESS
