@@ -43,6 +43,16 @@ pub struct ShellOpts {
     pub xtrace: bool,
 }
 
+impl expand::ShellExpand for Shell {
+    fn vars(&self) -> &Variables { &self.vars }
+    fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
+    fn exit_status(&self) -> ExitStatus { self.exit_status }
+    fn pid(&self) -> u32 { self.pid }
+    fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
+        self.command_subst(cmd)
+    }
+}
+
 impl Default for Shell {
     fn default() -> Self {
         Self::new()
@@ -140,57 +150,18 @@ impl Shell {
 
     /// Expand a word to a list of fields (with field splitting and globbing).
     pub(crate) fn expand_fields(&mut self, word: &Word) -> crate::error::Result<Vec<String>> {
-        // Use a raw pointer to self for the cmd_subst closure.
-        // This is safe because command_subst forks — the child gets its own
-        // copy of all data, and the parent only reads from a pipe.
-        let self_ptr = self as *mut Shell;
-        let mut cmd_fn = |cmd: &Command| -> String {
-            let shell = unsafe { &mut *self_ptr };
-            shell.command_subst(cmd).unwrap_or_default()
-        };
-        let mut cmd_subst: Option<&mut dyn FnMut(&Command) -> String> = Some(&mut cmd_fn);
-        expand::expand_word_to_fields(
-            word,
-            &mut self.vars,
-            self.exit_status,
-            self.pid,
-            &mut cmd_subst,
-        )
+        expand::expand_word_to_fields(word, self)
     }
 
     /// Expand a word to a single string (no field splitting or globbing).
     pub(crate) fn expand_string(&mut self, word: &Word) -> crate::error::Result<String> {
-        let self_ptr = self as *mut Shell;
-        let mut cmd_fn = |cmd: &Command| -> String {
-            let shell = unsafe { &mut *self_ptr };
-            shell.command_subst(cmd).unwrap_or_default()
-        };
-        let mut cmd_subst: Option<&mut dyn FnMut(&Command) -> String> = Some(&mut cmd_fn);
-        expand::expand_word_to_string(
-            word,
-            &mut self.vars,
-            self.exit_status,
-            self.pid,
-            &mut cmd_subst,
-        )
+        expand::expand_word_to_string(word, self)
     }
 
     /// Expand word parts into a fnmatch-ready pattern string.
     /// Glob chars from quoted regions are escaped.
     pub(crate) fn expand_pattern(&mut self, word: &Word) -> crate::error::Result<String> {
-        let self_ptr = self as *mut Shell;
-        let mut cmd_fn = |cmd: &Command| -> String {
-            let shell = unsafe { &mut *self_ptr };
-            shell.command_subst(cmd).unwrap_or_default()
-        };
-        let mut cmd_subst: Option<&mut dyn FnMut(&Command) -> String> = Some(&mut cmd_fn);
-        expand::expand_pattern(
-            &word.parts,
-            &mut self.vars,
-            self.exit_status,
-            self.pid,
-            &mut cmd_subst,
-        )
+        expand::expand_pattern(&word.parts, self)
     }
 
     /// Evaluate a command node, returning its exit status.

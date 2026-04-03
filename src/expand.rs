@@ -4,6 +4,17 @@ use crate::error::{ExitStatus, ShellError};
 use crate::glob;
 use crate::var::Variables;
 
+/// Trait abstracting the shell state needed during word expansion.
+/// Allows expand functions to access variables, exit status, PID, and
+/// command substitution without requiring a direct `&mut Shell` reference.
+pub trait ShellExpand {
+    fn vars(&self) -> &Variables;
+    fn vars_mut(&mut self) -> &mut Variables;
+    fn exit_status(&self) -> ExitStatus;
+    fn pid(&self) -> u32;
+    fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String>;
+}
+
 /// An expanded word fragment with metadata for field splitting.
 #[derive(Debug, Clone)]
 pub struct ExpandedWord {
@@ -20,16 +31,13 @@ pub struct ExpandedWord {
 ///   tilde → parameter → command subst → arithmetic → field split → glob → quote removal
 pub fn expand_word_to_fields(
     word: &Word,
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<Vec<String>> {
     // Step 1: Expand to intermediate fragments with split_fields metadata
-    let fragments = expand_word_parts(&word.parts, vars, exit_status, shell_pid, false, cmd_subst)?;
+    let fragments = expand_word_parts(&word.parts, sh, false)?;
 
     // Step 2: Field splitting on fragments marked split_fields=true
-    let ifs = vars.ifs().to_string();
+    let ifs = sh.vars().ifs().to_string();
     let split = field_split(&fragments, &ifs);
 
     // Step 3: Pathname expansion (globbing) on results
@@ -58,10 +66,7 @@ pub fn expand_word_to_fields(
 /// Used for: ${var%pattern}, ${var#pattern}, case patterns.
 pub fn expand_pattern(
     parts: &[WordPart],
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<String> {
     let mut result = String::new();
     for part in parts {
@@ -82,7 +87,7 @@ pub fn expand_pattern(
             WordPart::DoubleQuoted(inner) => {
                 // Double-quoted — expand inner parts but escape glob chars
                 let inner_expanded = expand_word_parts_inner(
-                    inner, vars, exit_status, shell_pid, true, cmd_subst, false,
+                    inner, sh, true, false,
                 )?;
                 let text: String = inner_expanded.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
@@ -94,7 +99,7 @@ pub fn expand_pattern(
             }
             WordPart::Param(param) => {
                 // Parameter expansion in pattern — value is literal (escape globs)
-                let value = expand_param(param, vars, exit_status, shell_pid, cmd_subst)?;
+                let value = expand_param(param, sh)?;
                 for c in value.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
                         result.push('\\');
@@ -105,7 +110,7 @@ pub fn expand_pattern(
             _ => {
                 // Other parts (CmdSubst, Arith, etc.) — expand and escape
                 let frags = expand_word_parts_inner(
-                    std::slice::from_ref(part), vars, exit_status, shell_pid, true, cmd_subst, false,
+                    std::slice::from_ref(part), sh, true, false,
                 )?;
                 let text: String = frags.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
@@ -124,12 +129,9 @@ pub fn expand_pattern(
 /// Used for: here-doc bodies, assignment values, case words.
 pub fn expand_word_to_string(
     word: &Word,
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<String> {
-    let fragments = expand_word_parts(&word.parts, vars, exit_status, shell_pid, true, cmd_subst)?;
+    let fragments = expand_word_parts(&word.parts, sh, true)?;
     Ok(fragments.into_iter().map(|f| f.value).collect())
 }
 
@@ -138,22 +140,16 @@ pub fn expand_word_to_string(
 /// be marked for field splitting since they're part of an expansion result.
 fn expand_word_parts(
     parts: &[WordPart],
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
+    sh: &mut dyn ShellExpand,
     quoted_context: bool,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
 ) -> crate::error::Result<Vec<ExpandedWord>> {
-    expand_word_parts_inner(parts, vars, exit_status, shell_pid, quoted_context, cmd_subst, false)
+    expand_word_parts_inner(parts, sh, quoted_context, false)
 }
 
 fn expand_word_parts_inner(
     parts: &[WordPart],
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
+    sh: &mut dyn ShellExpand,
     quoted_context: bool,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
     in_param_word: bool,
 ) -> crate::error::Result<Vec<ExpandedWord>> {
     let mut result = Vec::new();
@@ -181,7 +177,7 @@ fn expand_word_parts_inner(
 
                 if has_at && inner.len() == 1 {
                     // Simple case: "$@" alone — expand to separate fields
-                    for arg in vars.positional.iter() {
+                    for arg in sh.vars().positional.iter() {
                         result.push(ExpandedWord {
                             value: arg.clone(),
                             split_fields: false,
@@ -202,11 +198,8 @@ fn expand_word_parts_inner(
                             } else {
                                 let expanded = expand_word_parts(
                                     std::slice::from_ref(p),
-                                    vars,
-                                    exit_status,
-                                    shell_pid,
+                                    sh,
                                     true,
-                                    cmd_subst,
                                 )?;
                                 for f in expanded {
                                     prefix.push_str(&f.value);
@@ -218,24 +211,23 @@ fn expand_word_parts_inner(
                     }
                     let suffix_frags = expand_word_parts(
                         &suffix_parts,
-                        vars,
-                        exit_status,
-                        shell_pid,
+                        sh,
                         true,
-                        cmd_subst,
                     )?;
                     let suffix: String = suffix_frags.into_iter().map(|f| f.value).collect();
 
-                    if vars.positional.is_empty() {
+                    if sh.vars().positional.is_empty() {
                         // "$@" with no positional params produces nothing (not even empty string)
                     } else {
-                        for (i, arg) in vars.positional.iter().enumerate() {
+                        let positional = sh.vars().positional.clone();
+                        let pos_len = positional.len();
+                        for (i, arg) in positional.iter().enumerate() {
                             let mut val = String::new();
                             if i == 0 {
                                 val.push_str(&prefix);
                             }
                             val.push_str(arg);
-                            if i == vars.positional.len() - 1 {
+                            if i == pos_len - 1 {
                                 val.push_str(&suffix);
                             }
                             result.push(ExpandedWord {
@@ -248,7 +240,7 @@ fn expand_word_parts_inner(
                 } else {
                     // No $@ — normal double-quote handling
                     let expanded =
-                        expand_word_parts(inner, vars, exit_status, shell_pid, true, cmd_subst)?;
+                        expand_word_parts(inner, sh, true)?;
                     let value: String = expanded.into_iter().map(|f| f.value).collect();
                     result.push(ExpandedWord {
                         value,
@@ -260,7 +252,8 @@ fn expand_word_parts_inner(
             WordPart::Param(param) => {
                 // $@ unquoted: expand to separate fields
                 if param.name == "@" && matches!(param.op, ParamOp::Normal) && !quoted_context {
-                    for arg in &vars.positional {
+                    let positional = sh.vars().positional.clone();
+                    for arg in &positional {
                         result.push(ExpandedWord {
                             value: arg.clone(),
                             split_fields: false,
@@ -271,8 +264,8 @@ fn expand_word_parts_inner(
                 // $* in quoted context: join with first char of IFS
                 else if param.name == "*" && matches!(param.op, ParamOp::Normal) && quoted_context
                 {
-                    let sep = vars.ifs().chars().next().map_or(String::new(), |c| c.to_string());
-                    let value = vars.positional.join(&sep);
+                    let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+                    let value = sh.vars().positional.join(&sep);
                     result.push(ExpandedWord {
                         value,
                         split_fields: false,
@@ -285,7 +278,8 @@ fn expand_word_parts_inner(
                     && matches!(param.op, ParamOp::Normal)
                     && !quoted_context
                 {
-                    for arg in &vars.positional {
+                    let positional = sh.vars().positional.clone();
+                    for arg in &positional {
                         result.push(ExpandedWord {
                             value: arg.clone(),
                             split_fields: true, // subject to further IFS splitting
@@ -295,10 +289,7 @@ fn expand_word_parts_inner(
                 } else {
                     let frags = expand_param_to_fragments(
                         param,
-                        vars,
-                        exit_status,
-                        shell_pid,
-                        cmd_subst,
+                        sh,
                         quoted_context,
                     )?;
                     result.extend(frags);
@@ -313,11 +304,7 @@ fn expand_word_parts_inner(
                 });
             }
             WordPart::CmdSubst(cmd) | WordPart::Backtick(cmd) => {
-                let value = if let Some(f) = cmd_subst.as_mut() {
-                    f(cmd)
-                } else {
-                    String::new()
-                };
+                let value = sh.command_subst(cmd).unwrap_or_default();
                 result.push(ExpandedWord {
                     value,
                     split_fields: !quoted_context,
@@ -327,12 +314,14 @@ fn expand_word_parts_inner(
             WordPart::Arith(inner) => {
                 // First expand any variables in the arithmetic expression
                 let text: String =
-                    expand_word_parts(inner, vars, exit_status, shell_pid, true, cmd_subst)?
+                    expand_word_parts(inner, sh, true)?
                         .into_iter()
                         .map(|f| f.value)
                         .collect();
                 // Then evaluate the arithmetic
-                let value = arith::eval_arith(&text, vars, exit_status, shell_pid)
+                let exit_status = sh.exit_status();
+                let shell_pid = sh.pid();
+                let value = arith::eval_arith(&text, sh.vars_mut(), exit_status, shell_pid)
                     .map_err(|e| ShellError::Runtime {
                         msg: format!("arithmetic error: {e}"),
                         span: crate::error::Span::default(),
@@ -353,18 +342,17 @@ fn expand_word_parts_inner(
 /// Expand a parameter expression to fragments, preserving quoting info.
 fn expand_param_to_fragments(
     param: &ParamExpr,
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
     quoted_context: bool,
 ) -> crate::error::Result<Vec<ExpandedWord>> {
     let name = &param.name;
 
     let raw_value = if is_special_param(name) {
-        vars.get_special(name, exit_status, shell_pid)
+        let exit_status = sh.exit_status();
+        let pid = sh.pid();
+        sh.vars().get_special(name, exit_status, pid)
     } else {
-        vars.get(name).map(String::from)
+        sh.vars().get(name).map(String::from)
     };
 
     // For operators that use a word (default, assign, alternative, error),
@@ -404,16 +392,13 @@ fn expand_param_to_fragments(
             if is_unset {
                 let frags = expand_word_parts_inner(
                     word,
-                    vars,
-                    exit_status,
-                    shell_pid,
+                    sh,
                     quoted_context,
-                    cmd_subst,
                     true, // in_param_word: literals subject to field splitting
                 )?;
                 if matches!(param.op, ParamOp::Assign { .. }) {
                     let val: String = frags.iter().map(|f| f.value.clone()).collect();
-                    let _ = vars.set(name, &val);
+                    let _ = sh.vars_mut().set(name, &val);
                 }
                 Ok(frags)
             } else {
@@ -432,7 +417,7 @@ fn expand_param_to_fragments(
                 raw_value.is_none()
             };
             if is_unset {
-                let msg = expand_param_word(word, vars, exit_status, shell_pid, cmd_subst)?;
+                let msg = expand_param_word(word, sh)?;
                 let display_msg = if msg.is_empty() {
                     format!("{name}: parameter not set")
                 } else {
@@ -462,11 +447,8 @@ fn expand_param_to_fragments(
             } else {
                 let frags = expand_word_parts_inner(
                     word,
-                    vars,
-                    exit_status,
-                    shell_pid,
+                    sh,
                     quoted_context,
-                    cmd_subst,
                     true, // in_param_word
                 )?;
                 Ok(frags)
@@ -474,7 +456,7 @@ fn expand_param_to_fragments(
         }
         _ => {
             // Trim operations — fall back to string-based expand_param
-            let value = expand_param(param, vars, exit_status, shell_pid, cmd_subst)?;
+            let value = expand_param(param, sh)?;
             Ok(vec![ExpandedWord {
                 value,
                 split_fields: !quoted_context,
@@ -487,18 +469,17 @@ fn expand_param_to_fragments(
 /// Expand a parameter expression (returns flat string).
 fn expand_param(
     param: &ParamExpr,
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<String> {
     let name = &param.name;
 
     // Get the raw value
     let raw_value = if is_special_param(name) {
-        vars.get_special(name, exit_status, shell_pid)
+        let exit_status = sh.exit_status();
+        let pid = sh.pid();
+        sh.vars().get_special(name, exit_status, pid)
     } else {
-        vars.get(name).map(String::from)
+        sh.vars().get(name).map(String::from)
     };
 
     match &param.op {
@@ -520,7 +501,7 @@ fn expand_param(
                 raw_value.is_none()
             };
             if is_unset {
-                expand_param_word(word, vars, exit_status, shell_pid, cmd_subst)
+                expand_param_word(word, sh)
             } else {
                 Ok(raw_value.unwrap_or_default())
             }
@@ -532,8 +513,8 @@ fn expand_param(
                 raw_value.is_none()
             };
             if is_unset {
-                let default = expand_param_word(word, vars, exit_status, shell_pid, cmd_subst)?;
-                let _ = vars.set(name, &default);
+                let default = expand_param_word(word, sh)?;
+                let _ = sh.vars_mut().set(name, &default);
                 Ok(default)
             } else {
                 Ok(raw_value.unwrap_or_default())
@@ -546,7 +527,7 @@ fn expand_param(
                 raw_value.is_none()
             };
             if is_unset {
-                let msg = expand_param_word(word, vars, exit_status, shell_pid, cmd_subst)?;
+                let msg = expand_param_word(word, sh)?;
                 let display_msg = if msg.is_empty() {
                     format!("{name}: parameter not set")
                 } else {
@@ -569,27 +550,27 @@ fn expand_param(
             if is_unset {
                 Ok(String::new())
             } else {
-                expand_param_word(word, vars, exit_status, shell_pid, cmd_subst)
+                expand_param_word(word, sh)
             }
         }
         ParamOp::TrimSuffixSmall(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, sh)?;
             Ok(trim_suffix(&val, &pat, false))
         }
         ParamOp::TrimSuffixLarge(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, sh)?;
             Ok(trim_suffix(&val, &pat, true))
         }
         ParamOp::TrimPrefixSmall(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, sh)?;
             Ok(trim_prefix(&val, &pat, false))
         }
         ParamOp::TrimPrefixLarge(pattern) => {
             let val = raw_value.unwrap_or_default();
-            let pat = expand_pattern(pattern, vars, exit_status, shell_pid, cmd_subst)?;
+            let pat = expand_pattern(pattern, sh)?;
             Ok(trim_prefix(&val, &pat, true))
         }
     }
@@ -598,12 +579,9 @@ fn expand_param(
 /// Expand a parameter operation's word (the part after :-, :=, etc.)
 fn expand_param_word(
     parts: &[WordPart],
-    vars: &mut Variables,
-    exit_status: ExitStatus,
-    shell_pid: u32,
-    cmd_subst: &mut Option<&mut dyn FnMut(&Command) -> String>,
+    sh: &mut dyn ShellExpand,
 ) -> crate::error::Result<String> {
-    let fragments = expand_word_parts(parts, vars, exit_status, shell_pid, true, cmd_subst)?;
+    let fragments = expand_word_parts(parts, sh, true)?;
     Ok(fragments.into_iter().map(|f| f.value).collect())
 }
 
@@ -778,6 +756,31 @@ mod tests {
     use super::*;
     use crate::error::Span;
 
+    struct TestShell {
+        vars: Variables,
+        status: ExitStatus,
+    }
+
+    impl TestShell {
+        fn new(vars: Variables) -> Self {
+            Self { vars, status: ExitStatus::SUCCESS }
+        }
+
+        fn with_status(vars: Variables, status: ExitStatus) -> Self {
+            Self { vars, status }
+        }
+    }
+
+    impl ShellExpand for TestShell {
+        fn vars(&self) -> &Variables { &self.vars }
+        fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
+        fn exit_status(&self) -> ExitStatus { self.status }
+        fn pid(&self) -> u32 { 1 }
+        fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {
+            Ok(String::new())
+        }
+    }
+
     fn make_vars() -> Variables {
         let mut vars = Variables::new();
         vars.set("FOO", "hello").unwrap();
@@ -797,31 +800,31 @@ mod tests {
 
     #[test]
     fn expand_literal() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Literal("hello".into())]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["hello"]
         );
     }
 
     #[test]
     fn expand_simple_variable() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FOO".into(),
             op: ParamOp::Normal,
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["hello"]
         );
     }
 
     #[test]
     fn expand_default_unset() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "UNSET".into(),
             op: ParamOp::Default {
@@ -831,14 +834,14 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["fallback"]
         );
     }
 
     #[test]
     fn expand_default_colon_empty() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "EMPTY".into(),
             op: ParamOp::Default {
@@ -848,14 +851,14 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["fallback"]
         );
     }
 
     #[test]
     fn expand_default_set() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FOO".into(),
             op: ParamOp::Default {
@@ -865,14 +868,14 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["hello"]
         );
     }
 
     #[test]
     fn expand_assign_default() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "NEW_VAR".into(),
             op: ParamOp::Assign {
@@ -882,15 +885,15 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["assigned"]
         );
-        assert_eq!(vars.get("NEW_VAR"), Some("assigned"));
+        assert_eq!(sh.vars.get("NEW_VAR"), Some("assigned"));
     }
 
     #[test]
     fn expand_alternative_set() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FOO".into(),
             op: ParamOp::Alternative {
@@ -900,14 +903,14 @@ mod tests {
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["alt"]
         );
     }
 
     #[test]
     fn expand_alternative_unset() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "UNSET".into(),
             op: ParamOp::Alternative {
@@ -916,96 +919,96 @@ mod tests {
             },
             span: Span::default(),
         })]);
-        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap();
+        let result = expand_word_to_fields(&word, &mut sh).unwrap();
         assert!(result.is_empty() || result == vec![""]);
     }
 
     #[test]
     fn expand_length() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FOO".into(),
             op: ParamOp::Length,
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["5"]
         );
     }
 
     #[test]
     fn expand_trim_suffix_small() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FILE".into(),
             op: ParamOp::TrimSuffixSmall(vec![WordPart::Literal(".*".into())]),
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["archive.tar"]
         );
     }
 
     #[test]
     fn expand_trim_suffix_large() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "FILE".into(),
             op: ParamOp::TrimSuffixLarge(vec![WordPart::Literal(".*".into())]),
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["archive"]
         );
     }
 
     #[test]
     fn expand_trim_prefix_small() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "PATH_VAR".into(),
             op: ParamOp::TrimPrefixSmall(vec![WordPart::Literal("*/".into())]),
             span: Span::default(),
         })]);
         // Smallest prefix matching */: removes "/" (since */ matches "/")
-        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap();
+        let result = expand_word_to_fields(&word, &mut sh).unwrap();
         assert_eq!(result, vec!["usr/local/bin:/usr/bin:/bin"]);
     }
 
     #[test]
     fn expand_trim_prefix_large() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "PATH_VAR".into(),
             op: ParamOp::TrimPrefixLarge(vec![WordPart::Literal("*/".into())]),
             span: Span::default(),
         })]);
         // Largest prefix matching */: removes everything up to last /
-        let result = expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap();
+        let result = expand_word_to_fields(&word, &mut sh).unwrap();
         assert_eq!(result, vec!["bin"]);
     }
 
     #[test]
     fn expand_tilde_home() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![
             WordPart::Tilde(String::new()),
             WordPart::Literal("/bin".into()),
         ]);
-        let result = expand_word_to_string(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap();
+        let result = expand_word_to_string(&word, &mut sh).unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(result, format!("{home}/bin"));
     }
 
     #[test]
     fn expand_single_quoted() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::SingleQuoted("$FOO".into())]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["$FOO"]
         );
     }
@@ -1014,6 +1017,7 @@ mod tests {
     fn expand_double_quoted_no_split() {
         let mut vars = make_vars();
         vars.set("X", "a  b  c").unwrap();
+        let mut sh = TestShell::new(vars);
         let word = make_word(vec![WordPart::DoubleQuoted(vec![WordPart::Param(
             ParamExpr {
                 name: "X".into(),
@@ -1023,7 +1027,7 @@ mod tests {
         )])]);
         // Inside double quotes, no field splitting
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus::SUCCESS, 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["a  b  c"]
         );
     }
@@ -1070,14 +1074,14 @@ mod tests {
 
     #[test]
     fn expand_exit_status() {
-        let mut vars = make_vars();
+        let mut sh = TestShell::with_status(make_vars(), ExitStatus(42));
         let word = make_word(vec![WordPart::Param(ParamExpr {
             name: "?".into(),
             op: ParamOp::Normal,
             span: Span::default(),
         })]);
         assert_eq!(
-            expand_word_to_fields(&word, &mut vars, ExitStatus(42), 1, &mut None).unwrap(),
+            expand_word_to_fields(&word, &mut sh).unwrap(),
             vec!["42"]
         );
     }
