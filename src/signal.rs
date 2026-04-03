@@ -12,10 +12,62 @@ static SIGHUP_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Map a signal name (e.g. "INT", "SIGINT") to its libc signal number.
 pub fn name_to_signal(name: &str) -> Option<i32> {
+    // Strip "SIG" prefix if present
+    let name = name.strip_prefix("SIG").unwrap_or(name);
     match name {
-        "INT" | "SIGINT" => Some(libc::SIGINT),
-        "TERM" | "SIGTERM" => Some(libc::SIGTERM),
-        "HUP" | "SIGHUP" => Some(libc::SIGHUP),
+        "HUP" => Some(libc::SIGHUP),
+        "INT" => Some(libc::SIGINT),
+        "QUIT" => Some(libc::SIGQUIT),
+        "ILL" => Some(libc::SIGILL),
+        "TRAP" => Some(libc::SIGTRAP),
+        "ABRT" | "IOT" => Some(libc::SIGABRT),
+        "FPE" => Some(libc::SIGFPE),
+        "KILL" => Some(libc::SIGKILL),
+        "BUS" => Some(libc::SIGBUS),
+        "SEGV" => Some(libc::SIGSEGV),
+        "SYS" => Some(libc::SIGSYS),
+        "PIPE" => Some(libc::SIGPIPE),
+        "ALRM" => Some(libc::SIGALRM),
+        "TERM" => Some(libc::SIGTERM),
+        "URG" => Some(libc::SIGURG),
+        "STOP" => Some(libc::SIGSTOP),
+        "TSTP" => Some(libc::SIGTSTP),
+        "CONT" => Some(libc::SIGCONT),
+        "CHLD" => Some(libc::SIGCHLD),
+        "TTIN" => Some(libc::SIGTTIN),
+        "TTOU" => Some(libc::SIGTTOU),
+        "USR1" => Some(libc::SIGUSR1),
+        "USR2" => Some(libc::SIGUSR2),
+        _ => None,
+    }
+}
+
+/// Map a signal number to its name (without SIG prefix).
+pub fn signal_to_name(signum: i32) -> Option<&'static str> {
+    match signum {
+        libc::SIGHUP => Some("HUP"),
+        libc::SIGINT => Some("INT"),
+        libc::SIGQUIT => Some("QUIT"),
+        libc::SIGILL => Some("ILL"),
+        libc::SIGTRAP => Some("TRAP"),
+        libc::SIGABRT => Some("ABRT"),
+        libc::SIGFPE => Some("FPE"),
+        libc::SIGKILL => Some("KILL"),
+        libc::SIGBUS => Some("BUS"),
+        libc::SIGSEGV => Some("SEGV"),
+        libc::SIGSYS => Some("SYS"),
+        libc::SIGPIPE => Some("PIPE"),
+        libc::SIGALRM => Some("ALRM"),
+        libc::SIGTERM => Some("TERM"),
+        libc::SIGURG => Some("URG"),
+        libc::SIGSTOP => Some("STOP"),
+        libc::SIGTSTP => Some("TSTP"),
+        libc::SIGCONT => Some("CONT"),
+        libc::SIGCHLD => Some("CHLD"),
+        libc::SIGTTIN => Some("TTIN"),
+        libc::SIGTTOU => Some("TTOU"),
+        libc::SIGUSR1 => Some("USR1"),
+        libc::SIGUSR2 => Some("USR2"),
         _ => None,
     }
 }

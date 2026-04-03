@@ -107,6 +107,7 @@ impl Shell {
             "type" => Some(self.builtin_type(args)),
             "wait" => Some(self.builtin_wait(args)),
             "trap" => Some(self.builtin_trap(args)),
+            "kill" => Some(self.builtin_kill(args)),
             "umask" => Some(self.builtin_umask(args)),
             "getopts" => Some(self.builtin_getopts(args)),
             "printf" => Some(self.builtin_printf(args)),
@@ -682,6 +683,97 @@ impl Shell {
         ExitStatus::SUCCESS
     }
 
+    fn builtin_kill(&self, args: &[String]) -> ExitStatus {
+        if args.len() <= 1 {
+            self.err_msg("kill: usage: kill [-s signal | -signal] pid ...");
+            return ExitStatus::MISUSE;
+        }
+
+        let mut i = 1;
+        let mut signum = libc::SIGTERM; // default signal
+
+        // Parse signal specification
+        if args[i] == "-l" || args[i] == "-L" {
+            // kill -l [exit_status] — list signals
+            if args.len() > i + 1 {
+                // Convert exit status to signal name
+                if let Ok(status) = args[i + 1].parse::<i32>() {
+                    let sig = if status > 128 { status - 128 } else { status };
+                    if let Some(name) = crate::signal::signal_to_name(sig) {
+                        self.write_out(&format!("{name}\n"));
+                        return ExitStatus::SUCCESS;
+                    }
+                }
+                self.err_msg(&format!("kill: {}: invalid signal specification", args[i + 1]));
+                return ExitStatus::FAILURE;
+            }
+            // List all signals
+            for sig in 1..32 {
+                if let Some(name) = crate::signal::signal_to_name(sig) {
+                    self.write_out(&format!("{sig}) SIG{name}\n"));
+                }
+            }
+            return ExitStatus::SUCCESS;
+        } else if args[i] == "-s" {
+            // kill -s SIGNAL pid...
+            i += 1;
+            if i >= args.len() {
+                self.err_msg("kill: -s requires a signal name");
+                return ExitStatus::MISUSE;
+            }
+            let sig_name = args[i].to_uppercase();
+            match crate::signal::name_to_signal(&sig_name) {
+                Some(s) => signum = s,
+                None => {
+                    self.err_msg(&format!("kill: {}: invalid signal specification", args[i]));
+                    return ExitStatus::FAILURE;
+                }
+            }
+            i += 1;
+        } else if args[i].starts_with('-') && args[i].len() > 1 {
+            let spec = &args[i][1..];
+            // kill -9 pid... or kill -TERM pid...
+            if let Ok(n) = spec.parse::<i32>() {
+                signum = n;
+            } else {
+                let sig_name = spec.to_uppercase();
+                match crate::signal::name_to_signal(&sig_name) {
+                    Some(s) => signum = s,
+                    None => {
+                        self.err_msg(&format!("kill: {}: invalid signal specification", spec));
+                        return ExitStatus::FAILURE;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if i >= args.len() {
+            self.err_msg("kill: usage: kill [-s signal | -signal] pid ...");
+            return ExitStatus::MISUSE;
+        }
+
+        let mut status = ExitStatus::SUCCESS;
+        for pid_str in &args[i..] {
+            match pid_str.parse::<i32>() {
+                Ok(pid) => {
+                    // SAFETY: Sending a signal to a process. Invalid PIDs return ESRCH.
+                    let ret = unsafe { libc::kill(pid, signum) };
+                    if ret != 0 {
+                        let err = std::io::Error::last_os_error();
+                        self.err_msg(&format!("kill: ({pid}) - {err}"));
+                        status = ExitStatus::FAILURE;
+                    }
+                }
+                Err(_) => {
+                    self.err_msg(&format!("kill: {pid_str}: arguments must be process IDs"));
+                    status = ExitStatus::FAILURE;
+                }
+            }
+        }
+        status
+    }
+
     fn builtin_umask(&self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
             // SAFETY: umask() is always safe; no invalid arguments possible.
@@ -985,7 +1077,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "export", "readonly", "unset", "set", "shift",
     "eval", ".", "source", "test", "[",
     "read", "local", "exec", "command", "type",
-    "wait", "trap", "umask", "getopts",
+    "wait", "trap", "kill", "umask", "getopts",
 ];
 
 /// Check if a command name is a shell builtin.

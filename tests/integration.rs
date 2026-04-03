@@ -988,3 +988,50 @@ mod nounset {
         assert!(stderr.contains("parameter not set"), "stderr: {stderr}");
     }
 }
+
+mod kill_builtin {
+    use super::*;
+
+    #[test]
+    fn kill_zero_tests_process() {
+        // kill -0 tests if process exists without sending a signal
+        assert_output("kill -0 $$; echo $?", "0\n");
+    }
+
+    #[test]
+    fn kill_invalid_pid() {
+        let (_, stderr, code) = run("kill -0 999999999");
+        assert_ne!(code, 0);
+        assert!(stderr.contains("999999999"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn kill_list_signals() {
+        let (stdout, _, code) = run("kill -l");
+        assert_eq!(code, 0);
+        assert!(stdout.contains("SIGTERM"), "stdout: {stdout}");
+        assert!(stdout.contains("SIGINT"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn kill_list_exit_status() {
+        // 130 = 128 + 2 (SIGINT)
+        assert_output("kill -l 130", "INT\n");
+    }
+
+    #[test]
+    fn kill_sends_signal() {
+        // Start a background sleep and kill it
+        assert_output("sleep 10 & kill $!; wait; echo done", "done\n");
+    }
+
+    #[test]
+    fn kill_named_signal() {
+        assert_output("sleep 10 & kill -s TERM $!; wait; echo done", "done\n");
+    }
+
+    #[test]
+    fn kill_is_builtin() {
+        assert_output("command -v kill", "kill\n");
+    }
+}
