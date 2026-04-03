@@ -38,8 +38,10 @@ exit code.
 - **Parse-then-execute** — inspect the AST between parsing and execution
 - **Process group isolation** — every child gets `setpgid`; cancellation kills the tree
 - **Fork-free command substitution** — `$(echo ...)` runs in-process, 3.6x faster than dash
+- **External command handler** — plug in your own process spawner for sandboxing or job control
+- **Interactive shell primitives** — `tcsetpgrp`, `WUNTRACED`, `Stopped` for building shells on top
 - **10k lines of Rust + libc** — no other dependencies
-- 290 tests, zero clippy warnings
+- 314 tests, zero clippy warnings
 
 ## Usage
 
@@ -88,11 +90,37 @@ assert!(!is_builtin("rm"));
 | `.nounset(bool)` | Error on unset variables (`set -u`) |
 | `.xtrace(bool)` | Print commands before execution (`set -x`) |
 | `.pipefail(bool)` | Return highest nonzero pipeline status |
+| `.interactive(bool)` | Enable tcsetpgrp/WUNTRACED for job control |
 | `.stdout_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stdout |
 | `.stderr_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stderr |
 | `.cancel_flag(Arc<AtomicBool>)` | Cancellation flag |
 | `.timeout(Duration)` | Execution deadline |
 | `.env_clear()` | Don't inherit process environment |
+| `.external_handler(ExternalHandler)` | Custom process spawner |
+
+### Building an interactive shell on epsh
+
+epsh deliberately excludes interactive features (prompt, history, line
+editing, job control builtins). However, it provides the minimal primitives
+needed for an interactive shell to be built on top:
+
+- **`external_handler`**: Replace the default fork+exec with your own process
+  spawner. Your handler receives expanded args and env pairs with redirections
+  already applied to fds. This lets you own the fork/exec/wait cycle for
+  terminal and job control.
+
+- **`interactive` mode**: When enabled, pipelines call `tcsetpgrp` to give the
+  foreground process group the terminal, and `waitpid` uses `WUNTRACED` to
+  detect stopped processes. `ShellError::Stopped { pid, pgid }` propagates up
+  with the pipeline's process group ID, so you can save the job and resume it
+  later with `kill(pgid, SIGCONT)` + `tcsetpgrp`.
+
+- **`BUILTIN_NAMES`** / **`is_builtin()`**: For command-word coloring and
+  completion in the prompt.
+
+Everything else — prompt rendering, line editing, history, `fg`/`bg`/`jobs`
+builtins, signal mask management — is the interactive shell's responsibility.
+epsh handles parsing, expansion, control flow, builtins, and redirections.
 
 ## CLI
 
@@ -136,20 +164,20 @@ with private field and type-safe methods.
 
 ## Not implemented (by design)
 
-- Job control (`fg`, `bg`, `jobs`, process groups for interactive use)
-- Interactive features (prompt, history, line editing)
+These live in the interactive shell layer, not in epsh:
+
+- Job control builtins (`fg`, `bg`, `jobs`) — use `external_handler` + `Stopped`
+- Prompt, history, line editing — use rustyline/reedline/etc.
 - Aliases
 - Here-strings (`<<<`), extended globs, arrays, `typeset`, `select`
-
-These are ksh/bash extensions or interactive features. A coding agent
-doesn't need them.
 
 ## Testing
 
 ```sh
-cargo test                      # 290 tests (141 unit + 27 embedding + 122 integration)
-cargo test --test embedding     # embedding API tests
-cargo test --test integration   # shell behavior tests
+cargo test                      # 314 tests
+cargo test --test api_stability # API surface regression tests
+cargo test --test embedding     # embedding API tests (31)
+cargo test --test integration   # shell behavior tests (122)
 cargo build && perl check.pl \
   -p ./target/debug/epsh \
   -s check-epsh.t              # 161/167 mksh conformance

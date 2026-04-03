@@ -3,7 +3,7 @@
 ## Current Status
 
 - **161/167 mksh conformance tests passing (96%)**
-- 290 tests (141 unit + 27 embedding + 122 integration)
+- 314 tests (141 unit + 16 API stability + 31 embedding + 122 integration + 4 encoding)
 - Zero clippy warnings
 - 10k lines of Rust across 16 modules
 
@@ -58,6 +58,10 @@ The loop gap requires integer variable representation (dash's approach).
 18. **Integer var cache** — avoids string→i64 parse in arithmetic hot path
 19. **Shell::builder()** — fluent API for embedder configuration
 20. **BUILTIN_NAMES** — public constant for permission systems
+21. **ExternalHandler** — callback for custom process spawning
+22. **Interactive mode** — tcsetpgrp/WUNTRACED/Stopped for job control primitives
+23. **API stability tests** — compile-time surface regression checks
+24. **SAFETY comments** — all 45 unsafe blocks documented
 
 ### Key dash-compatible mechanisms
 - **EV_TESTED** errexit suppression for conditionals and `&&`/`||`/`!`

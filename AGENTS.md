@@ -2,7 +2,7 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-161/167 (96%) mksh conformance on dash-passable tests. 10k lines, 290 tests (141 unit + 27 embedding + 122 integration).
+161/167 (96%) mksh conformance on dash-passable tests. 10k lines, 314 tests.
 
 ## Architecture
 
@@ -49,10 +49,21 @@ let mut shell = Shell::builder()
 let program = Parser::new("echo hello").parse().unwrap();
 let status = shell.run_program(&program);
 
-// One-shot
-let exit_code = shell.run_script("echo hello");
+// Custom process spawner (for sandboxing, job control, SSH proxy)
+shell.set_external_handler(Box::new(|args, env| {
+    // args[0] is command name, env is prefix assignments
+    // redirections already applied to fds
+    todo!("spawn the process your way")
+}));
 
-// Builtin detection for permission systems
+// Interactive shell primitives
+let mut ish = Shell::builder()
+    .interactive(true)           // enables tcsetpgrp + WUNTRACED
+    .external_handler(handler)   // you own fork/exec/wait
+    .build();
+// ShellError::Stopped { pid, pgid } propagates when a process is stopped
+
+// Builtin detection for permission systems / prompt coloring
 assert!(is_builtin("echo"));
 assert!(!is_builtin("rm"));
 ```
@@ -168,8 +179,9 @@ Things we know about but haven't implemented:
 ## Testing
 
 ```sh
-cargo test                                              # 290 tests
-cargo test --test embedding                             # embedding API tests (27)
+cargo test                                              # 314 tests
+cargo test --test api_stability                         # API surface regression (16)
+cargo test --test embedding                             # embedding API tests (31)
 cargo test --test integration                           # shell behavior tests (122)
 cargo build && perl check.pl -p ./target/debug/epsh \
   -s check-epsh.t                                       # 161/167 mksh conformance
@@ -177,15 +189,31 @@ sh tests/stress/run.sh ./target/debug/epsh dash         # performance vs dash
 perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
 ```
 
-- `tests/embedding.rs` — builder, cancellation, timeout, sinks, cwd isolation, builtins API
+- `tests/api_stability.rs` — compile-time checks that the public API surface doesn't break
+- `tests/embedding.rs` — builder, cancellation, timeout, sinks, cwd isolation, external handler
 - `tests/integration.rs` — builtins, expansion, control flow, redirections, assignments,
   POSIX edge cases (adapted from oils/spec/posix.test.sh and mksh test suite)
 - `tests/stress/` — 8 benchmark scripts comparing epsh vs dash
 
+## Interactive Shell Support
+
+epsh doesn't implement interactive features directly, but provides the minimal
+primitives for an interactive shell to be built on top:
+
+- **`ExternalHandler`**: callback replacing fork+exec for external commands.
+  The embedder owns process creation for job control and terminal management.
+- **`interactive` mode**: `tcsetpgrp` gives pipeline foreground, `WUNTRACED`
+  detects stopped processes, `ShellError::Stopped { pid, pgid }` carries
+  the pipeline PGID for job resume.
+- **`BUILTIN_NAMES`**: for prompt coloring and completion.
+
+Everything else (prompt, history, line editing, `fg`/`bg`/`jobs`) is the
+interactive shell's responsibility.
+
 ## What's Not Implemented (by design)
 
-- Job control (fg, bg, jobs, process groups)
-- Interactive features (prompt, history, line editing)
+- Job control builtins (fg, bg, jobs) — use `external_handler` + `Stopped`
+- Interactive features (prompt, history, line editing) — use rustyline/reedline
 - Aliases
 - Here-strings (`<<<`)
 - Extended globs (`@(...)`, `+(...)`, etc.)
