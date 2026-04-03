@@ -1,6 +1,7 @@
 pub mod arith;
 pub mod ast;
 mod builtins;
+pub mod encoding;
 pub mod error;
 pub mod eval;
 pub mod expand;
@@ -8,6 +9,6 @@ pub mod glob;
 pub mod lexer;
 pub mod parser;
 mod redirect;
-mod sys;
+pub(crate) mod sys;
 mod test_cmd;
 pub mod var;

@@ -123,7 +123,7 @@ impl Shell {
                             self.expand_string(&word)?
                         }
                     };
-                    let _ = (&write_end).write_all(expanded.as_bytes());
+                    let _ = (&write_end).write_all(&crate::encoding::str_to_bytes(&expanded));
                     drop(write_end);
 
                     unsafe {

@@ -23,7 +23,7 @@ impl Shell {
             "echo" => Some(self.builtin_echo(args)),
             "cd" => Some(self.builtin_cd(args)),
             "pwd" => {
-                self.write_out(format!("{}\n", self.cwd.display()).as_bytes());
+                self.write_out(&format!("{}\n", self.cwd.display()));
                 Some(ExitStatus::SUCCESS)
             }
             "exit" => {
@@ -144,7 +144,7 @@ impl Shell {
         if newline {
             text.push('\n');
         }
-        self.write_out(text.as_bytes());
+        self.write_out(&text);
         ExitStatus::SUCCESS
     }
 
@@ -184,7 +184,7 @@ impl Shell {
         if args.len() <= 1 {
             // Print all exported variables
             for (k, v) in self.vars.exported_env() {
-                self.write_out(format!("export {k}=\"{v}\"\n").as_bytes());
+                self.write_out(&format!("export {k}=\"{v}\"\n"));
             }
             return ExitStatus::SUCCESS;
         }
@@ -342,8 +342,8 @@ impl Shell {
         }
         let filename = &args[1];
         let filepath = self.resolve_path(filename);
-        let content = match std::fs::read_to_string(&filepath) {
-            Ok(c) => c,
+        let content = match std::fs::read(&filepath) {
+            Ok(bytes) => crate::encoding::bytes_to_str(&bytes),
             Err(e) => {
                 self.err_msg(&format!(".: {filename}: {e}"));
                 // . is a special builtin — file not found is fatal
@@ -573,11 +573,11 @@ impl Shell {
         let mut status = ExitStatus::SUCCESS;
         for name in &args[1..] {
             if self.functions.contains_key(name.as_str()) {
-                self.write_out(format!("{name} is a function\n").as_bytes());
+                self.write_out(&format!("{name} is a function\n"));
             } else if is_builtin(name) {
-                self.write_out(format!("{name} is a shell builtin\n").as_bytes());
+                self.write_out(&format!("{name} is a shell builtin\n"));
             } else if let Ok(path) = which(name) {
-                self.write_out(format!("{name} is {path}\n").as_bytes());
+                self.write_out(&format!("{name} is {path}\n"));
             } else {
                 self.err_msg(&format!("{name}: not found"));
                 status = ExitStatus::FAILURE;
@@ -602,7 +602,7 @@ impl Shell {
         if args.len() <= 1 {
             // Print current traps
             for (sig, action) in &self.traps {
-                self.write_out(format!("trap -- '{}' {}\n", action, sig).as_bytes());
+                self.write_out(&format!("trap -- '{}' {}\n", action, sig));
             }
             return ExitStatus::SUCCESS;
         }
@@ -636,7 +636,7 @@ impl Shell {
             unsafe {
                 sys::umask(mask);
             }
-            self.write_out(format!("{mask:04o}\n").as_bytes());
+            self.write_out(&format!("{mask:04o}\n"));
             return ExitStatus::SUCCESS;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
@@ -919,7 +919,7 @@ impl Shell {
             }
         }
 
-        self.write_out(out.as_bytes());
+        self.write_out(&out);
         ExitStatus::SUCCESS
     }
 }

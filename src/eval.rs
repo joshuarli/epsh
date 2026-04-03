@@ -123,22 +123,25 @@ impl Shell {
         self.stderr_sink = Some(sink);
     }
 
-    /// Write to stdout (sink or fd 1).
-    pub(crate) fn write_out(&self, data: &[u8]) {
+    /// Write a string to stdout (sink or fd 1).
+    /// Decodes PUA-encoded bytes back to raw bytes for non-UTF-8 preservation.
+    pub(crate) fn write_out(&self, s: &str) {
+        let data = crate::encoding::str_to_bytes(s);
         if let Some(ref sink) = self.stdout_sink {
             if let Ok(mut w) = sink.lock() {
-                let _ = w.write_all(data);
+                let _ = w.write_all(&data);
             }
         } else {
             unsafe { sys::write(1, data.as_ptr() as *const _, data.len()); }
         }
     }
 
-    /// Write to stderr (sink or fd 2).
-    pub(crate) fn write_err(&self, data: &[u8]) {
+    /// Write a string to stderr (sink or fd 2).
+    pub(crate) fn write_err(&self, s: &str) {
+        let data = crate::encoding::str_to_bytes(s);
         if let Some(ref sink) = self.stderr_sink {
             if let Ok(mut w) = sink.lock() {
-                let _ = w.write_all(data);
+                let _ = w.write_all(&data);
             }
         } else {
             unsafe { sys::write(2, data.as_ptr() as *const _, data.len()); }
@@ -147,9 +150,9 @@ impl Shell {
 
     /// Write a formatted error message to stderr.
     pub(crate) fn err_msg(&self, msg: &str) {
-        self.write_err(msg.as_bytes());
+        self.write_err(msg);
         if !msg.ends_with('\n') {
-            self.write_err(b"\n");
+            self.write_err("\n");
         }
     }
 
@@ -629,7 +632,7 @@ impl Shell {
                     trace.push_str(&value);
                 }
                 trace.push('\n');
-                self.write_err(trace.as_bytes());
+                self.write_err(&trace);
             }
             for assign in assigns {
                 let value = self.expand_string(&assign.value)?;
@@ -656,7 +659,7 @@ impl Shell {
                 trace.push_str(arg);
             }
             trace.push('\n');
-            self.write_err(trace.as_bytes());
+            self.write_err(&trace);
         }
 
         let cmd_name = &expanded_args[0];
@@ -1028,8 +1031,9 @@ impl Shell {
         {
                     let filename = self.expand_string(word)?;
                     let filepath = self.resolve_path(&filename);
-                    match std::fs::read_to_string(&filepath) {
-                        Ok(mut content) => {
+                    match std::fs::read(&filepath) {
+                        Ok(bytes) => {
+                            let mut content = crate::encoding::bytes_to_str(&bytes);
                             // Remove trailing newlines (like command substitution)
                             while content.ends_with('\n') {
                                 content.pop();
@@ -1082,9 +1086,10 @@ impl Shell {
             sys::close(fds[1]);
             self.child_pids.push(pid);
 
-            let mut output = String::new();
+            let mut raw_output = Vec::new();
             let mut read_file = std::fs::File::from_raw_fd(fds[0]);
-            let _ = read_file.read_to_string(&mut output);
+            let _ = read_file.read_to_end(&mut raw_output);
+            let mut output = crate::encoding::bytes_to_str(&raw_output);
 
             self.exit_status = self.wait_child(pid)?;
 

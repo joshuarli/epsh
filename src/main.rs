@@ -48,7 +48,7 @@ fn main() {
                 let filename = &args[i];
                 shell.set_args(&args[i..].iter().map(|s| s.as_str()).collect::<Vec<&str>>());
                 let content = match std::fs::read(filename) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Ok(bytes) => epsh::encoding::bytes_to_str(&bytes),
                     Err(e) => {
                         eprintln!("epsh: {filename}: {e}");
                         std::process::exit(127);
@@ -75,13 +75,13 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Read from stdin (pipe) — use lossy conversion for non-UTF-8 input
+    // Read from stdin (pipe) — preserve non-UTF-8 bytes via PUA encoding
     let mut bytes = Vec::new();
     if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
         eprintln!("epsh: {e}");
         std::process::exit(1);
     }
-    let input = String::from_utf8_lossy(&bytes);
+    let input = epsh::encoding::bytes_to_str(&bytes);
     let status = shell.run_script(&input);
     std::process::exit(status);
 }
