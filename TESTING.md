@@ -2,15 +2,18 @@
 
 ## Current Tests
 
-136 unit/integration tests across 9 modules:
+314 unit/integration tests across 9 modules + integration/embedding/API suites:
 
 - **lexer** (19): tokenization, quoting, operators, reserved words, comments, escapes
 - **parser** (34): full grammar coverage — simple commands, pipelines, compound commands, case, for, functions, word parts, parameter expansion syntax
 - **arith** (14): arithmetic evaluator — precedence, operators, variables, assignment, hex/octal, division by zero
-- **expand** (18): parameter expansion (all 10 POSIX ops), field splitting, tilde, globbing, quoting
+- **expand** (20): parameter expansion (all 10 POSIX ops), field splitting, tilde, globbing, quoting
 - **glob** (9): fnmatch pattern matching — wildcards, character classes, ranges, negation, escapes
-- **var** (7): set/get, unset, readonly, scope push/pop, positional params, special params
-- **eval** (35): end-to-end script execution — commands, pipelines, command substitution, here-docs, if/while/for/case, functions, arithmetic, subshells, set -e, test builtin, local vars, trap
+- **var** (8): set/get, unset, readonly, scope push/pop, positional params, special params
+- **eval** (32): end-to-end script execution — commands, pipelines, command substitution, here-docs, if/while/for/case, functions, arithmetic, subshells, set -e, test builtin, local vars, trap
+- **integration** (122): oils-spec and oils-posix conformance, builtins, redirections, control flow, xtrace, assignments, encoding
+- **embedding** (31): builder, sinks, cancellation, timeout, external handler, cwd isolation
+- **api_stability** (16): public API surface checks
 
 ## POSIX Conformance Testing
 
@@ -77,6 +80,4 @@ done
 ## Remaining Known Gaps
 
 - Signal handling: `trap` stores handlers but doesn't install signal handlers
-- `set -o pipefail`: not implemented
 - `~user` expansion: requires getpwnam, not available stdlib-only
-- Heredoc expansion: quoted vs unquoted heredoc body expansion not differentiated
