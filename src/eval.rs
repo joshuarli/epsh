@@ -7,12 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::ast::*;
 
-/// Builtins that don't modify shell state — safe to run in-process for
-/// command substitution without forking.
+/// Builtins safe to run in-process for command substitution.
+/// Either pure (no shell state modification) or delegates to pure commands.
+/// `command` is included because it dispatches to builtins/externals which
+/// work correctly with the output sink capture mechanism.
 fn is_pure_builtin(name: &str) -> bool {
     matches!(
         name,
-        "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type" | "test" | "["
+        "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type"
+            | "test" | "[" | "command"
     )
 }
 use crate::error::{ExitStatus, ShellError, Span};
