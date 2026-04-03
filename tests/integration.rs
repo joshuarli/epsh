@@ -1211,3 +1211,113 @@ mod heredoc_in_compounds {
         assert_output("f() { cat <<EOF\nhi\nEOF\n}; f; f", "hi\nhi\n");
     }
 }
+
+mod printf_format {
+    use super::*;
+
+    #[test]
+    fn printf_loops_format_over_remaining_args() {
+        assert_output("printf '%s\n' a b c", "a\nb\nc\n");
+    }
+
+    #[test]
+    fn printf_loops_two_arg_format() {
+        assert_output("printf '%s=%s\n' x 1 y 2", "x=1\ny=2\n");
+    }
+
+    #[test]
+    fn printf_partial_final_iteration() {
+        // Last iteration has fewer args than format specs; missing args default to empty
+        assert_output("printf '%s,%s\n' a b c", "a,b\nc,\n");
+    }
+
+    #[test]
+    fn printf_no_args_runs_format_once() {
+        assert_output("printf 'hello\n'", "hello\n");
+    }
+}
+
+mod dot_return {
+    use super::*;
+
+    #[test]
+    fn return_exits_dot_script() {
+        let (stdout, _, code) = run(
+            "echo 'echo before; return 0; echo after' > /tmp/epsh_dot_ret_$$.sh; . /tmp/epsh_dot_ret_$$.sh; echo continued; rm -f /tmp/epsh_dot_ret_$$.sh"
+        );
+        assert_eq!(stdout, "before\ncontinued\n");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn return_with_status_from_dot_script() {
+        let (stdout, _, code) = run(
+            "echo 'return 42' > /tmp/epsh_dot_ret2_$$.sh; . /tmp/epsh_dot_ret2_$$.sh; echo \"rc=$?\"; rm -f /tmp/epsh_dot_ret2_$$.sh"
+        );
+        assert_eq!(stdout, "rc=42\n");
+        assert_eq!(code, 0);
+    }
+}
+
+mod fd_numbers {
+    use super::*;
+
+    #[test]
+    fn three_digit_fd_redirect() {
+        // Use fd 100 — redirect output, then write to it
+        assert_output(
+            "exec 100>/tmp/epsh_fd100_$$.txt; echo hello >&100; exec 100>&-; cat /tmp/epsh_fd100_$$.txt; rm -f /tmp/epsh_fd100_$$.txt",
+            "hello\n",
+        );
+    }
+
+    #[test]
+    fn two_digit_fd_redirect() {
+        assert_output(
+            "exec 10>/tmp/epsh_fd10_$$.txt; echo hi >&10; exec 10>&-; cat /tmp/epsh_fd10_$$.txt; rm -f /tmp/epsh_fd10_$$.txt",
+            "hi\n",
+        );
+    }
+}
+
+mod getopts_safety {
+    use super::*;
+
+    #[test]
+    fn getopts_basic() {
+        assert_output(
+            "set -- -a -b; while getopts ab opt; do echo $opt; done",
+            "a\nb\n",
+        );
+    }
+
+    #[test]
+    fn getopts_with_arg() {
+        assert_output(
+            "set -- -f file; while getopts f: opt; do echo \"$opt=$OPTARG\"; done",
+            "f=file\n",
+        );
+    }
+}
+
+mod set_dash {
+    use super::*;
+
+    #[test]
+    fn set_dash_clears_xe() {
+        // set - should turn off -x and -e per POSIX
+        // With xtrace on, "echo hello" would produce "+ echo hello\n" on stderr
+        let (stdout, stderr, code) = run("set -x; set -; echo hello");
+        assert_eq!(stdout, "hello\n");
+        assert!(!stderr.contains("+ echo"), "xtrace should be off after 'set -', got stderr: {stderr}");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn set_dashdash_stops_flag_processing() {
+        assert_output(
+            "set -- -a -b -c; echo $1 $2 $3",
+            "-a -b -c\n",
+        );
+    }
+}

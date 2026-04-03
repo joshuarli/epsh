@@ -882,11 +882,14 @@ impl Shell {
         let format = &args[1];
         let mut arg_idx = 2;
         let fmt_chars: Vec<char> = format.chars().collect();
-        let mut i = 0;
         let mut out = String::new();
 
         use std::fmt::Write;
 
+        // POSIX: reuse format string while arguments remain
+        loop {
+        let mut i = 0;
+        let arg_start = arg_idx;
         while i < fmt_chars.len() {
             if fmt_chars[i] == '\\' {
                 i += 1;
@@ -1036,6 +1039,11 @@ impl Shell {
                 out.push(fmt_chars[i]);
                 i += 1;
             }
+        }
+        // If format consumed no args, or no args remain, stop looping
+        if arg_idx == arg_start || arg_idx >= args.len() {
+            break;
+        }
         }
 
         self.write_out(&out);
