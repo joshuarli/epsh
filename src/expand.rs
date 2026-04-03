@@ -20,6 +20,8 @@ pub trait ShellExpand {
     fn shell_flags(&self) -> String;
     /// Last background PID for `$!`, if any.
     fn last_bg_pid(&self) -> Option<u32>;
+    /// Whether set -u (nounset) is active.
+    fn nounset(&self) -> bool;
 }
 
 /// An expanded word fragment with metadata for field splitting.
@@ -366,6 +368,21 @@ fn expand_param_to_fragments(
         sh.vars().get(name).map(String::from)
     };
 
+    // set -u: error on unset variables (not special params, not ops that handle unset)
+    if raw_value.is_none()
+        && !is_special_param(name)
+        && sh.nounset()
+        && matches!(param.op,
+            ParamOp::Normal | ParamOp::Length
+            | ParamOp::TrimSuffixSmall(_) | ParamOp::TrimSuffixLarge(_)
+            | ParamOp::TrimPrefixSmall(_) | ParamOp::TrimPrefixLarge(_))
+    {
+        return Err(ShellError::Runtime {
+            msg: format!("{name}: parameter not set"),
+            span: param.span,
+        });
+    }
+
     // For operators that use a word (default, assign, alternative, error),
     // expand the word to fragments to preserve quoting
     match &param.op {
@@ -494,6 +511,21 @@ fn expand_param(
     } else {
         sh.vars().get(name).map(String::from)
     };
+
+    // set -u: error on unset variables (not special params, not ops that handle unset)
+    if raw_value.is_none()
+        && !is_special_param(name)
+        && sh.nounset()
+        && matches!(param.op,
+            ParamOp::Normal | ParamOp::Length
+            | ParamOp::TrimSuffixSmall(_) | ParamOp::TrimSuffixLarge(_)
+            | ParamOp::TrimPrefixSmall(_) | ParamOp::TrimPrefixLarge(_))
+    {
+        return Err(ShellError::Runtime {
+            msg: format!("{name}: parameter not set"),
+            span: param.span,
+        });
+    }
 
     match &param.op {
         ParamOp::BadSubst => {
@@ -793,6 +825,7 @@ mod tests {
         fn cwd(&self) -> &Path { Path::new("/") }
         fn shell_flags(&self) -> String { String::new() }
         fn last_bg_pid(&self) -> Option<u32> { None }
+        fn nounset(&self) -> bool { false }
         fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {
             Ok(String::new())
         }

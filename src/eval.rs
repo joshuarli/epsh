@@ -153,6 +153,7 @@ impl expand::ShellExpand for Shell {
     fn cwd(&self) -> &Path { &self.cwd }
     fn shell_flags(&self) -> String { self.opts.flags_string() }
     fn last_bg_pid(&self) -> Option<u32> { self.last_bg_pid }
+    fn nounset(&self) -> bool { self.opts.nounset }
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
         self.command_subst(cmd)
     }

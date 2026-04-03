@@ -26,7 +26,7 @@ pub fn install_handler(signum: i32) {
     // SAFETY: sigaction is async-signal-safe. The handler only sets an atomic flag.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = signal_handler as usize;
+        sa.sa_sigaction = signal_handler as *const () as usize;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(signum, &sa, std::ptr::null_mut());

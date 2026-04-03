@@ -929,3 +929,62 @@ mod oils_spec {
         );
     }
 }
+
+mod nounset {
+    use super::*;
+
+    #[test]
+    fn unset_var_errors() {
+        let (_, stderr, code) = run("set -u; echo $NONEXISTENT");
+        assert_ne!(code, 0);
+        assert!(stderr.contains("parameter not set"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn set_var_ok() {
+        assert_output("set -u; X=hello; echo $X", "hello\n");
+    }
+
+    #[test]
+    fn special_params_ok() {
+        // $?, $$, $# should never trigger nounset
+        let (stdout, _, code) = run("set -u; echo $?");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "0\n");
+    }
+
+    #[test]
+    fn default_op_bypasses() {
+        assert_output("set -u; echo ${UNSET-fallback}", "fallback\n");
+    }
+
+    #[test]
+    fn assign_op_bypasses() {
+        assert_output("set -u; echo ${UNSET=assigned}; echo $UNSET", "assigned\nassigned\n");
+    }
+
+    #[test]
+    fn alternative_op_bypasses() {
+        assert_output("set -u; echo \"${UNSET+alt}\"", "\n");
+    }
+
+    #[test]
+    fn error_op_still_errors() {
+        let (_, stderr, code) = run("set -u; echo ${UNSET?custom msg}");
+        assert_ne!(code, 0);
+        assert!(stderr.contains("custom msg"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn empty_var_not_unset() {
+        // set -u should NOT error on empty-but-set variables
+        assert_output("set -u; X=''; echo \"$X\"", "\n");
+    }
+
+    #[test]
+    fn length_of_unset_errors() {
+        let (_, stderr, code) = run("set -u; echo ${#NONEXISTENT}");
+        assert_ne!(code, 0);
+        assert!(stderr.contains("parameter not set"), "stderr: {stderr}");
+    }
+}
