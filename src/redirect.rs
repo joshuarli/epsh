@@ -4,7 +4,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use crate::ast::*;
 use crate::error::ShellError;
 use crate::eval::Shell;
-use crate::parser::parse_word_parts;
+
 use crate::sys;
 
 /// Saved file descriptor for restoration after redirections.
@@ -116,7 +116,7 @@ impl Shell {
                     // Expand body if delimiter was unquoted (like double-quote context)
                     let expanded = if !quoted {
                         let word = Word {
-                            parts: parse_word_parts(body),
+                            parts: crate::parser::parse_word_parts_heredoc(body),
                             span: redir.span,
                         };
                         self.expand_string(&word)?

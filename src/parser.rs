@@ -982,6 +982,12 @@ pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
     parse_word_parts_ctx(raw, false)
 }
 
+/// Parse word parts in double-quote context (single quotes are literal).
+/// Used for unquoted heredoc body expansion.
+pub fn parse_word_parts_heredoc(raw: &str) -> Vec<WordPart> {
+    parse_word_parts_ctx(raw, true)
+}
+
 fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
     let mut parts = Vec::new();
     let chars: Vec<char> = raw.chars().collect();
@@ -1013,7 +1019,7 @@ fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
             }
             '$' => {
                 i += 1;
-                if let Some(part) = parse_dollar(&chars, &mut i, false) {
+                if let Some(part) = parse_dollar(&chars, &mut i, in_dquote) {
                     parts.push(part);
                 } else {
                     // Bare $
