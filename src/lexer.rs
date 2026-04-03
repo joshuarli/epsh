@@ -1078,14 +1078,14 @@ impl Lexer {
                     content.push('`');
                 }
                 Some('#') => {
-                    // Comments inside $() are valid
+                    // Comments inside $() — use raw to avoid eating \<newline>
                     content.push('#');
-                    while let Some(c) = self.peek() {
+                    while let Some(c) = self.peek_raw() {
                         if c == '\n' {
                             break;
                         }
                         content.push(c);
-                        self.advance();
+                        self.advance_raw();
                     }
                 }
                 Some(c) => content.push(c),

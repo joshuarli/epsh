@@ -313,9 +313,12 @@ impl Shell {
                 return Ok(ExitStatus::MISUSE);
             }
         };
-        // If eval body is empty, preserve $? from argument expansion
-        // (e.g., eval "$(false)" should leave $?=1)
-        let mut status = self.exit_status;
+        if program.commands.is_empty() {
+            // Empty body: return SUCCESS (not the caller's expansion $?)
+            // eval " $(false)" → body is empty → 0
+            return Ok(ExitStatus::SUCCESS);
+        }
+        let mut status = ExitStatus::SUCCESS;
         for cmd in &program.commands {
             status = self.eval_command(cmd)?;
             self.exit_status = status;
