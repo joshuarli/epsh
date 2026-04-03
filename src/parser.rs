@@ -19,7 +19,7 @@ use crate::lexer::{Lexer, PendingHereDoc, Token, parts_have_quoting, parts_to_te
 pub struct Parser {
     lexer: Lexer,
     /// Heredoc bodies read at newlines, waiting to be patched into the AST.
-    heredoc_bodies: Vec<(String, bool)>,
+    heredoc_bodies: Vec<HereDocBody>,
 }
 
 impl Parser {
@@ -71,9 +71,8 @@ impl Parser {
                 if !self.lexer.pending_heredocs.is_empty() {
                     let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
                     for heredoc in &pending {
-                        let body = self.lexer.read_heredoc_body(heredoc)?;
-                        // Store bodies for later patching
-                        self.heredoc_bodies.push((body, heredoc.quoted));
+                        let raw = self.lexer.read_heredoc_body(heredoc)?;
+                        self.heredoc_bodies.push(make_heredoc_body(raw, heredoc.quoted));
                     }
                 }
             } else {
@@ -84,31 +83,33 @@ impl Parser {
     }
 
     /// Patch empty heredoc bodies in a command tree with the actual content.
-    fn patch_heredocs(cmd: &mut Command, bodies: &[(String, bool)]) {
+    fn patch_heredocs(cmd: &mut Command, bodies: &[HereDocBody]) {
         let mut idx = 0;
         Self::patch_heredocs_inner(cmd, bodies, &mut idx);
     }
 
-    fn patch_heredocs_inner(cmd: &mut Command, bodies: &[(String, bool)], idx: &mut usize) {
+    fn patch_heredoc_redirs(redirs: &mut [Redir], bodies: &[HereDocBody], idx: &mut usize) {
+        for redir in redirs.iter_mut() {
+            if *idx < bodies.len() {
+                match &redir.kind {
+                    RedirKind::HereDoc(HereDocBody::Literal(s)) if s.is_empty() => {
+                        redir.kind = RedirKind::HereDoc(bodies[*idx].clone());
+                        *idx += 1;
+                    }
+                    RedirKind::HereDocStrip(HereDocBody::Literal(s)) if s.is_empty() => {
+                        redir.kind = RedirKind::HereDocStrip(bodies[*idx].clone());
+                        *idx += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn patch_heredocs_inner(cmd: &mut Command, bodies: &[HereDocBody], idx: &mut usize) {
         match cmd {
             Command::Simple { redirs, .. } => {
-                for redir in redirs.iter_mut() {
-                    if *idx < bodies.len() {
-                        match &mut redir.kind {
-                            RedirKind::HereDoc { body, quoted } if body.is_empty() => {
-                                *body = bodies[*idx].0.clone();
-                                *quoted = bodies[*idx].1;
-                                *idx += 1;
-                            }
-                            RedirKind::HereDocStrip { body, quoted } if body.is_empty() => {
-                                *body = bodies[*idx].0.clone();
-                                *quoted = bodies[*idx].1;
-                                *idx += 1;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                Self::patch_heredoc_redirs(redirs, bodies, idx);
             }
             Command::Pipeline { commands, .. } => {
                 for c in commands.iter_mut() {
@@ -121,23 +122,7 @@ impl Parser {
             }
             Command::Subshell { body, redirs, .. } | Command::BraceGroup { body, redirs, .. } => {
                 Self::patch_heredocs_inner(body, bodies, idx);
-                for redir in redirs.iter_mut() {
-                    if *idx < bodies.len() {
-                        match &mut redir.kind {
-                            RedirKind::HereDoc { body, quoted } if body.is_empty() => {
-                                *body = bodies[*idx].0.clone();
-                                *quoted = bodies[*idx].1;
-                                *idx += 1;
-                            }
-                            RedirKind::HereDocStrip { body, quoted } if body.is_empty() => {
-                                *body = bodies[*idx].0.clone();
-                                *quoted = bodies[*idx].1;
-                                *idx += 1;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                Self::patch_heredoc_redirs(redirs, bodies, idx);
             }
             _ => {}
         }
@@ -180,14 +165,14 @@ impl Parser {
             let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
             let mut bodies = Vec::new();
             for heredoc in &pending {
-                let body = self.lexer.read_heredoc_body(heredoc)?;
-                bodies.push((body, heredoc.quoted));
+                let raw = self.lexer.read_heredoc_body(heredoc)?;
+                bodies.push(make_heredoc_body(raw, heredoc.quoted));
             }
             Self::patch_heredocs(cmd, &bodies);
         }
         // Second: apply any bodies that were read at newlines (via skip_newlines)
         if !self.heredoc_bodies.is_empty() {
-            let bodies: Vec<(String, bool)> = self.heredoc_bodies.drain(..).collect();
+            let bodies: Vec<HereDocBody> = self.heredoc_bodies.drain(..).collect();
             Self::patch_heredocs(cmd, &bodies);
         }
         Ok(())
@@ -214,8 +199,8 @@ impl Parser {
                     if !self.lexer.pending_heredocs.is_empty() {
                         let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
                         for heredoc in &pending {
-                            let body = self.lexer.read_heredoc_body(heredoc)?;
-                            self.heredoc_bodies.push((body, heredoc.quoted));
+                            let raw = self.lexer.read_heredoc_body(heredoc)?;
+                            self.heredoc_bodies.push(make_heredoc_body(raw, heredoc.quoted));
                         }
                     }
                     self.skip_newlines()?;
@@ -517,15 +502,9 @@ impl Parser {
                 Ok(Redir {
                     fd,
                     kind: if strip_tabs {
-                        RedirKind::HereDocStrip {
-                            body: String::new(),
-                            quoted,
-                        }
+                        RedirKind::HereDocStrip(HereDocBody::Literal(String::new()))
                     } else {
-                        RedirKind::HereDoc {
-                            body: String::new(),
-                            quoted,
-                        }
+                        RedirKind::HereDoc(HereDocBody::Literal(String::new()))
                     },
                     span,
                 })
@@ -982,20 +961,88 @@ pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
     parse_word_parts_ctx(raw, false)
 }
 
-/// Parse word parts in heredoc context: single quotes are literal,
-/// and only \$, \`, \\, \<newline> are special backslash escapes
-/// (NOT \" — unlike regular double quotes).
-pub fn parse_word_parts_heredoc(raw: &str) -> Vec<WordPart> {
-    parse_word_parts_impl(raw, true, true)
+/// Build a HereDocBody from a raw heredoc body string.
+fn make_heredoc_body(raw: String, quoted: bool) -> HereDocBody {
+    if quoted {
+        HereDocBody::Literal(raw)
+    } else {
+        HereDocBody::Parsed(parse_word_parts_heredoc(&raw))
+    }
 }
 
+/// Parse word parts in heredoc context: single quotes and double quotes are
+/// literal, and only \$, \`, \\, \<newline> are special backslash escapes
+/// (NOT \" — unlike regular double quotes).
+fn parse_word_parts_heredoc(raw: &str) -> Vec<WordPart> {
+    let mut parts = Vec::new();
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0;
 
+    while i < chars.len() {
+        match chars[i] {
+            '$' => {
+                i += 1;
+                if let Some(part) = parse_dollar(&chars, &mut i, true) {
+                    parts.push(part);
+                } else {
+                    parts.push(WordPart::Literal("$".into()));
+                }
+            }
+            '`' => {
+                i += 1; // skip opening `
+                let start = i;
+                while i < chars.len() && chars[i] != '`' {
+                    if chars[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                let content: String = chars[start..i].iter().collect();
+                if i < chars.len() {
+                    i += 1; // skip closing `
+                }
+                let cmd = parse_cmdsubst_content(&content);
+                parts.push(WordPart::Backtick(Box::new(cmd)));
+            }
+            '\\' => {
+                i += 1;
+                if i < chars.len() {
+                    if chars[i] == '\n' {
+                        // \<newline> = line continuation
+                        i += 1;
+                    } else if matches!(chars[i], '$' | '`' | '\\') {
+                        // Heredoc: only \$, \`, \\ are special (NOT \")
+                        parts.push(WordPart::Literal(chars[i].to_string()));
+                        i += 1;
+                    } else {
+                        // Other \X — preserve the backslash
+                        parts.push(WordPart::Literal(format!("\\{}", chars[i])));
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                // Accumulate literal text (quotes are literal in heredoc)
+                let start = i;
+                while i < chars.len() && !matches!(chars[i], '$' | '`' | '\\') {
+                    i += 1;
+                }
+                let text: String = chars[start..i].iter().collect();
+                if !text.is_empty() {
+                    parts.push(WordPart::Literal(text));
+                }
+            }
+        }
+    }
+
+    coalesce_literals(parts)
+}
 
 fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
-    parse_word_parts_impl(raw, in_dquote, false)
+    parse_word_parts_impl(raw, in_dquote)
 }
 
-fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<WordPart> {
+fn parse_word_parts_impl(raw: &str, in_dquote: bool) -> Vec<WordPart> {
     let mut parts = Vec::new();
     let chars: Vec<char> = raw.chars().collect();
     let mut i = 0;
@@ -1015,7 +1062,7 @@ fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<Wo
                     i += 1; // skip closing '
                 }
             }
-            '"' if !is_heredoc => {
+            '"' => {
                 // Double-quoted string — parse inner parts
                 i += 1; // skip opening "
                 let inner = parse_double_quoted_parts(&chars, &mut i);
@@ -1055,12 +1102,8 @@ fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<Wo
                     if chars[i] == '\n' {
                         // \<newline> = line continuation
                         i += 1;
-                    } else if is_heredoc && matches!(chars[i], '$' | '`' | '\\') {
-                        // Heredoc: only \$, \`, \\ are special (NOT \")
-                        parts.push(WordPart::Literal(chars[i].to_string()));
-                        i += 1;
-                    } else if !is_heredoc && matches!(chars[i], '$' | '`' | '"' | '\\') {
-                        // Double-quote context: \$, \`, \", \\ are special
+                    } else if matches!(chars[i], '$' | '`' | '"' | '\\') {
+                        // \$, \`, \", \\ are special
                         parts.push(WordPart::Literal(chars[i].to_string()));
                         i += 1;
                     } else {
@@ -1089,7 +1132,7 @@ fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<Wo
                 let start = i;
                 while i < chars.len()
                     && !matches!(chars[i], '$' | '`' | '\\')
-                    && (is_heredoc || chars[i] != '"')
+                    && chars[i] != '"'
                     && (in_dquote || chars[i] != '\'')
                     && !(chars[i] == '~' && i == 0)
                 {

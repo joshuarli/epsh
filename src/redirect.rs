@@ -104,8 +104,7 @@ impl Shell {
                         });
                     }
                 }
-                RedirKind::HereDoc { body, quoted }
-                | RedirKind::HereDocStrip { body, quoted } => {
+                RedirKind::HereDoc(body) | RedirKind::HereDocStrip(body) => {
                     let mut fds = [0i32; 2];
                     unsafe {
                         sys::pipe(fds.as_mut_ptr());
@@ -113,15 +112,12 @@ impl Shell {
                     let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
                     let read_fd = fds[0];
 
-                    // Expand body if delimiter was unquoted (like double-quote context)
-                    let expanded = if !quoted {
-                        let word = Word {
-                            parts: crate::parser::parse_word_parts_heredoc(body),
-                            span: redir.span,
-                        };
-                        self.expand_string(&word)?
-                    } else {
-                        body.clone()
+                    let expanded = match body {
+                        HereDocBody::Literal(s) => s.clone(),
+                        HereDocBody::Parsed(parts) => {
+                            let word = Word { parts: parts.clone(), span: redir.span };
+                            self.expand_string(&word)?
+                        }
                     };
                     let _ = (&write_end).write_all(expanded.as_bytes());
                     drop(write_end);

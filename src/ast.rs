@@ -181,6 +181,15 @@ pub struct Redir {
     pub span: Span,
 }
 
+/// Pre-parsed heredoc body.
+#[derive(Debug, Clone)]
+pub enum HereDocBody {
+    /// Quoted heredoc (<<'EOF') — no expansion, literal text
+    Literal(String),
+    /// Unquoted heredoc (<<EOF) — contains expandable word parts
+    Parsed(Vec<WordPart>),
+}
+
 /// Redirection type.
 #[derive(Debug, Clone)]
 pub enum RedirKind {
@@ -198,8 +207,8 @@ pub enum RedirKind {
     DupInput(Word),
     /// `>& fd` or `>& -`
     DupOutput(Word),
-    /// `<< delimiter` (here-document, expand)
-    HereDoc { body: String, quoted: bool },
+    /// `<< delimiter` (here-document)
+    HereDoc(HereDocBody),
     /// `<<- delimiter` (here-document, strip tabs)
-    HereDocStrip { body: String, quoted: bool },
+    HereDocStrip(HereDocBody),
 }
