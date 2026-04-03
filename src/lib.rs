@@ -51,6 +51,7 @@ pub mod lexer;
 /// Recursive-descent parser producing [`ast::Program`].
 pub mod parser;
 mod redirect;
+pub(crate) mod signal;
 pub(crate) mod sys;
 mod test_cmd;
 /// Variable storage with scope stack.

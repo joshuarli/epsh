@@ -525,10 +525,30 @@ impl Shell {
                     return self.exit_status;
                 }
             }
+            self.run_pending_traps();
         }
 
         self.run_exit_trap();
         self.exit_status
+    }
+
+    /// Check for pending signals and run their trap handlers.
+    fn run_pending_traps(&mut self) {
+        for sig_name in crate::signal::take_pending() {
+            if let Some(action) = self.traps.get(sig_name) {
+                // Empty action means ignore (trap '' SIG)
+                if action.is_empty() {
+                    continue;
+                }
+                let action = action.clone();
+                let mut parser = Parser::new(&action);
+                if let Ok(program) = parser.parse() {
+                    for cmd in &program.commands {
+                        let _ = self.eval_command(cmd);
+                    }
+                }
+            }
+        }
     }
 
     /// Run the EXIT trap if one is set.

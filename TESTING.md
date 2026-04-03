@@ -79,5 +79,5 @@ done
 
 ## Remaining Known Gaps
 
-- Signal handling: `trap` stores handlers but doesn't install signal handlers
+- Signal traps: INT/TERM/HUP traps fire between commands but not during blocking waits; other signals not yet supported
 - `~user` expansion: requires getpwnam, not available stdlib-only

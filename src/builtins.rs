@@ -650,7 +650,11 @@ impl Shell {
                     self.write_out(&format!("trap -- '{}' {}\n", action, sig));
                 }
             } else {
-                self.traps.remove(&sig.to_uppercase());
+                let normalized = sig.to_uppercase();
+                self.traps.remove(&normalized);
+                if let Some(signum) = crate::signal::name_to_signal(&normalized) {
+                    crate::signal::reset_handler(signum);
+                }
             }
             return ExitStatus::SUCCESS;
         }
@@ -659,8 +663,20 @@ impl Shell {
             let normalized = sig_name.to_uppercase();
             if action == "-" {
                 self.traps.remove(&normalized);
+                if let Some(signum) = crate::signal::name_to_signal(&normalized) {
+                    crate::signal::reset_handler(signum);
+                }
+            } else if action.is_empty() {
+                // trap '' SIG — ignore the signal
+                self.traps.insert(normalized.clone(), action.clone());
+                if let Some(signum) = crate::signal::name_to_signal(&normalized) {
+                    crate::signal::ignore_signal(signum);
+                }
             } else {
-                self.traps.insert(normalized, action.clone());
+                self.traps.insert(normalized.clone(), action.clone());
+                if let Some(signum) = crate::signal::name_to_signal(&normalized) {
+                    crate::signal::install_handler(signum);
+                }
             }
         }
         ExitStatus::SUCCESS
