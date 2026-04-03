@@ -192,7 +192,10 @@ impl Shell {
             if let Some(eq) = arg.find('=') {
                 let name = &arg[..eq];
                 let value = &arg[eq + 1..];
-                let _ = self.vars.set(name, value);
+                if let Err(e) = self.vars.set(name, value) {
+                    self.err_msg(&format!("export: {e}"));
+                    return ExitStatus::FAILURE;
+                }
                 self.vars.export(name);
             } else {
                 self.vars.export(arg);
@@ -206,7 +209,10 @@ impl Shell {
             if let Some(eq) = arg.find('=') {
                 let name = &arg[..eq];
                 let value = &arg[eq + 1..];
-                let _ = self.vars.set(name, value);
+                if let Err(e) = self.vars.set(name, value) {
+                    self.err_msg(&format!("readonly: {e}"));
+                    return ExitStatus::FAILURE;
+                }
                 self.vars.set_readonly(name);
             } else {
                 self.vars.set_readonly(arg);
@@ -434,7 +440,10 @@ impl Shell {
         if hit_eof && line.is_empty() {
             // Pure EOF with no data: set variables to empty
             for name in &var_names {
-                let _ = self.vars.set(name, "");
+                if let Err(e) = self.vars.set(name, "") {
+                    self.err_msg(&format!("read: {e}"));
+                    return ExitStatus::FAILURE;
+                }
             }
             return ExitStatus::FAILURE;
         }
@@ -444,7 +453,10 @@ impl Shell {
         if var_names.len() == 1 {
             // Single variable gets the whole line (with leading/trailing IFS stripped)
             let trimmed = line.trim_matches(|c: char| ifs.contains(c));
-            let _ = self.vars.set(var_names[0], trimmed);
+            if let Err(e) = self.vars.set(var_names[0], trimmed) {
+                self.err_msg(&format!("read: {e}"));
+                return ExitStatus::FAILURE;
+            }
         } else {
             // Multiple variables: split on IFS, last gets remainder
             let mut fields = Vec::new();
@@ -480,7 +492,10 @@ impl Shell {
 
             for (vi, name) in var_names.iter().enumerate() {
                 let value = fields.get(vi).map(|s| s.as_str()).unwrap_or("");
-                let _ = self.vars.set(name, value);
+                if let Err(e) = self.vars.set(name, value) {
+                    self.err_msg(&format!("read: {e}"));
+                    return ExitStatus::FAILURE;
+                }
             }
         }
         // POSIX: return >0 if EOF was detected, even if data was read

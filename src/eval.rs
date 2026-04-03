@@ -573,9 +573,9 @@ impl Shell {
         self.vars.positional = args.iter().skip(1).map(|s| s.to_string()).collect();
     }
 
-    /// Set a variable.
-    pub fn set_var(&mut self, name: &str, value: &str) {
-        let _ = self.vars.set(name, value);
+    /// Set a variable. Returns error if the variable is readonly.
+    pub fn set_var(&mut self, name: &str, value: &str) -> Result<(), String> {
+        self.vars.set(name, value)
     }
 
     /// Get a variable's value.
@@ -826,7 +826,10 @@ impl Shell {
                 let mut last_status = ExitStatus::SUCCESS;
                 for value in &word_list {
                     self.check_cancel()?;
-                    let _ = self.vars.set(var, value);
+                    if let Err(e) = self.vars.set(var, value) {
+                        self.err_msg(&format!("{e}"));
+                        return Ok(ExitStatus::FAILURE);
+                    }
                     match self.eval_command(body) {
                         Ok(s) => last_status = s,
                         Err(ShellError::Break(1)) => break,

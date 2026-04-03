@@ -1321,3 +1321,43 @@ mod set_dash {
         );
     }
 }
+
+mod readonly_enforcement {
+    use super::*;
+
+    #[test]
+    fn readonly_assignment_errors() {
+        let (_, stderr, code) = run("readonly X=1; X=2");
+        assert!(stderr.contains("readonly"), "stderr: {stderr}");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn export_readonly_errors() {
+        let (_, stderr, code) = run("readonly X=1; export X=2");
+        assert!(stderr.contains("readonly"), "stderr: {stderr}");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn read_readonly_errors() {
+        let (_, stderr, code) = run("readonly X=1; echo hello | read X");
+        assert!(stderr.contains("readonly"), "stderr: {stderr}");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn for_readonly_errors() {
+        let (_, stderr, code) = run("readonly i=1; for i in a b; do echo $i; done");
+        assert!(stderr.contains("readonly"), "stderr: {stderr}");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn readonly_assignment_exits_shell() {
+        // POSIX: assignment to readonly var in non-interactive shell causes exit
+        let (_, stderr, code) = run("readonly X=1; X=2; echo should_not_reach");
+        assert!(stderr.contains("readonly"), "stderr: {stderr}");
+        assert_ne!(code, 0);
+    }
+}
