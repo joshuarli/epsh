@@ -1,75 +1,155 @@
 # epsh — Embeddable POSIX Shell
 
-Non-interactive, embeddable POSIX shell written in stdlib-only Rust. Designed as a script executor for coding agents.
+Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
+
+156/167 (93%) mksh conformance on dash-passable tests. 9.4k lines, 136 unit tests.
 
 ## Architecture
 
 ```
 src/
-  lib.rs        Public API (re-exports modules)
-  main.rs       CLI binary: epsh [-c cmd] [-e] [script.sh]
-  ast.rs        AST node types (Command, Word, WordPart, Redir, etc.)
-  lexer.rs      Tokenizer: source text → Token stream
-  parser.rs     Recursive-descent parser: tokens → AST
-  eval.rs       Tree-walking evaluator + builtins (Shell struct)
-  expand.rs     Word expansion: tilde, param, cmdsub, arith, IFS split, glob
-  arith.rs      Arithmetic expression evaluator for $((…))
-  var.rs        Variable storage with scope stack
-  glob.rs       Custom fnmatch + pathname expansion (no libc glob)
-  sys.rs        Minimal POSIX syscall wrappers (fork, pipe, dup2, etc.)
+  lib.rs          Public API
+  main.rs         CLI binary: epsh [-c cmd] [-e] [script.sh]
+  ast.rs          (205) AST types: Command, Word, WordPart, Redir, ParamExpr
+  lexer.rs        (1912) Single-pass tokenizer with syntax-context tracking
+  parser.rs       (1924) Recursive-descent parser, heredoc body reading
+  eval.rs         (1076) Shell struct, eval dispatch, pipelines, subshells, comsub
+  builtins.rs     (1019) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
+  expand.rs       (1084) Word expansion: tilde, param, arith, IFS split, glob, patterns
+  arith.rs        (809)  $((…)) evaluator with short-circuit (noeval)
+  var.rs          (315)  Variable storage with scope stack
+  glob.rs         (289)  Custom fnmatch + pathname expansion
+  redirect.rs     (151)  FD save/restore for redirections
+  test_cmd.rs     (398)  POSIX test/[ recursive-descent evaluator
+  error.rs        (120)  ShellError enum, ExitStatus newtype, Result alias
+  sys.rs          (33)   Thin libc wrappers
 ```
 
-## Design Lineage
+## Design Lineage — What We Actually Took
 
-Three reference shells inform the design:
+The original plan drew from three reference shells. Here's what we ended up
+using, what we adapted, and where we diverged.
 
-- **dash** (primary): POSIX semantics and behavior target. The evaluator's errexit logic, heredoc handling, and `$@`/`$*` expansion follow dash's patterns directly. dash's `eval.c` EV_TESTED flag model is mirrored in our `tested` field.
+### From dash (primary — semantics and behavior)
 
-- **posh**: IFS field-splitting state machine (single-pass with IFS_WS/IFS_NWS states). SubType stack concept for nested `${var:-${other}}` expansion. Environment stacking model mapped to Rust's RAII scopes.
+dash is the conformance target. We ported these mechanisms directly:
 
-- **mrsh**: AST design — every node carries a `Span` for error reporting. Word-list nesting for quoting (instead of embedded control characters). Split-fields metadata (`word_break` flag on `ExpandedWord`). Library-first architecture.
+- **EV_TESTED errexit model** (`eval.rs`): Only leaf nodes (Simple, Pipeline, Subshell)
+  trigger `set -e` exit. Compound nodes propagate status but never exit directly.
+  The `tested` flag suppresses errexit in if/while/until conditions and `&&`/`||`
+  left operands. Matches `eval.c` lines 246-330.
 
-## Key Data Flow
+- **pgetc_eatbnl** (`lexer.rs`): `peek()` and `advance()` transparently consume
+  `\<newline>` continuations. `peek_raw()`/`advance_raw()` for single-quote and
+  heredoc body contexts. Comments use raw reading.
 
-```
-Shell::run_script(source)
-  → Parser::new(source)
-  → parser.parse() → Program { commands: Vec<Command> }
-  → for each command: shell.eval_command(cmd)
-      → expand words via shell.expand_fields/expand_string
-          → expand_word_parts (tilde, param, cmdsub, arith)
-          → field_split (IFS splitting with word_break boundaries)
-          → glob (pathname expansion)
-      → setup_redirections (dup2 with saved fd stack)
-      → dispatch: builtin / function / external (fork+exec)
-      → restore_redirections
-```
+- **parsesub syntax context** (`lexer.rs`): `read_brace_param` passes `in_dquote`
+  to `read_brace_word_parts`. Trim ops (`%`, `#`) force BASESYNTAX (single quotes
+  are quoting). Default/assign/alt (`-`, `+`, `=`, `?`) inherit context. Inner `"`
+  in dquote `${…}` toggles context (dash's `innerdq`).
 
-## Important Implementation Details
+- **Heredoc reading at newlines** (`parser.rs`): `read_pending_heredocs` called
+  after newline consumption in both `parse_program` and `parse_command_list`.
+  Matches dash's `parseheredoc()` in `readtoken()`.
 
-**stdout writes**: All builtins use `write_stdout()` / raw `sys::write(1, ...)` instead of `println!()`. This is required because `_exit()` doesn't flush Rust's `BufWriter`, which breaks command substitution (where fd 1 is a pipe).
+- **in_forked_child optimization** (`eval.rs`): Subshells inside pipeline children
+  execute directly without double-forking. Prevents pipe fd leaks. Mirrors dash's
+  `EV_EXIT` fast-path in `evalsubshell`.
 
-**Command substitution**: Uses `fork()` + pipe. The parent reads output; the child evaluates the command with stdout redirected to the pipe. The `expand_fields`/`expand_string` methods on Shell use a raw pointer trick (`self as *mut Shell`) to create the cmd_subst closure that bypasses borrow checker constraints — safe because fork gives the child its own address space.
+- **IO_NUMBER detection** (`parser.rs`): Digit-only unquoted words before `<`/`>`
+  parsed as fd numbers, not arguments.
 
-**errexit (`set -e`)**: Mirrors dash's EV_TESTED model. Only "leaf" nodes (Simple, Pipeline, Subshell) trigger errexit. Compound nodes (if, while, for, case, &&, ||) propagate status but don't exit. The `tested` flag suppresses errexit in if/while/until conditions and `&&`/`||` left operands.
+- **Arithmetic noeval** (`arith.rs`): Ternary `?:` and `&&`/`||` suppress side
+  effects (assignments) on non-taken branches via `noeval` flag. Matches dash's
+  `arith_yacc.c`.
 
-**`$@` vs `$*`**: `"$@"` produces separate `ExpandedWord` fragments with `word_break: true`. `"$*"` joins with IFS[0]. Unquoted `$@` and `$*` both produce separate word-break fields. The `field_split` function respects `word_break` boundaries to keep `"$@"` arguments separate.
+- **preglob/RMESCAPE_GLOB** (`expand.rs`): `expand_pattern()` escapes glob
+  metacharacters from quoted regions for fnmatch. Used by trim ops and case patterns.
 
-**Variable scoping**: `Variables` has a scope stack (`Vec<Scope>`). `push_scope()` on function entry, `pop_scope()` on exit restores saved values. `make_local()` saves the current value before local modification.
+- **Heredoc body rules** (`parser.rs`, `lexer.rs`): Unquoted heredocs use DQSYNTAX
+  (single quotes literal, `"` literal, only `\$` `\`` `\\` `\<nl>` are special
+  backslash escapes). `\<newline>` continuation with odd/even backslash counting.
+
+### From posh (IFS and expansion)
+
+- **IFS field-splitting state machine** (`expand.rs`): Single-pass `field_split`
+  distinguishes IFS whitespace vs non-whitespace. Handles empty fields between
+  non-WS delimiters, leading/trailing WS stripping. Adopted as designed.
+
+- **in_param_word flag** (`expand.rs`): Literals inside `${var+word}` etc. are
+  marked `split_fields: true` when in unquoted context. This was our adaptation
+  of posh's SubType stack concept — we don't have a stack, but the flag achieves
+  the same per-context splitting behavior.
+
+- **Variable scope stack** (`var.rs`): `push_scope()`/`pop_scope()` with saved
+  values for `local`. Inspired by posh's environment stacking, implemented with
+  Rust's RAII-friendly design.
+
+### From mrsh (AST design and API)
+
+- **Span on every AST node** (`ast.rs`): Source position tracking for error
+  reporting. Used in ShellError::Syntax and ShellError::Runtime.
+
+- **word_break metadata** (`expand.rs`): `ExpandedWord` carries `word_break: bool`
+  to mark `"$@"` field boundaries, keeping arguments separate through field splitting.
+
+- **Library-first architecture**: `Shell` struct with `run_script`, `set_var`,
+  `get_var` API. The binary is a thin CLI wrapper.
+
+### Where We Diverged
+
+- **Single-pass WordPart building** — we started with mrsh's two-phase approach
+  (lexer collects raw text, parser re-parses into WordParts) but hit a wall of
+  quoting-context bugs at ~74% conformance. We restructured to build WordParts
+  directly during lexing (matching dash's single-pass model) while keeping
+  mrsh's typed enum representation instead of dash's control-character-in-string
+  approach. This was the highest-impact architectural change.
+
+- **ExitStatus newtype** — neither dash, posh, nor mrsh distinguish exit codes
+  at the type level. Our `ExitStatus(i32)` with named constants (`SUCCESS`,
+  `FAILURE`, `MISUSE`, `NOT_FOUND`, `NOT_EXECUTABLE`) and `from_wait()` prevents
+  integer confusion throughout the codebase.
+
+- **Expansion returns Result** — dash uses setjmp/longjmp, posh uses longjmp,
+  mrsh uses return codes. We use `Result<T, ShellError>` with the `?` operator,
+  which gives us dash-equivalent error propagation with Rust's type safety.
+  BadSubst, `${var?msg}`, and arithmetic errors all propagate cleanly.
+
+- **`$(<file)` optimization** — reads the file directly without forking, since
+  we can detect the pattern (Simple command with no args/assigns, one input
+  redirect) before entering the fork path.
+
+## What's Left on the Table
+
+Things we know about but haven't implemented:
+
+- **Signal trap execution**: `trap` stores handlers and EXIT traps fire, but we
+  don't install actual signal handlers (SIGINT, SIGTERM, etc. use default behavior).
+  A coding agent executor might want Ctrl-C handling.
+
+- **set -x (xtrace)**: The flag is stored but no trace output is produced.
+  Useful for debugging agent-generated scripts.
+
+- **Non-UTF-8 input**: Rust strings are UTF-8. Dash handles arbitrary bytes.
+  Unlikely to matter for coding agents but technically non-conformant.
+
+- **Heredoc in nested function definitions**: The heredoc body lifecycle doesn't
+  survive through function AST storage and re-execution. Niche edge case.
 
 ## Testing
 
-- 136 internal unit/integration tests (`cargo test`)
-- mksh conformance: 113/167 filtered tests pass (dash passes 167/167)
-- Test filter: `filter-tests.pl` extracts POSIX-relevant tests from mksh's `check.t`
-- Run: `perl check.pl -p ./target/debug/epsh -s check-epsh.t`
+```sh
+cargo test                                              # 136 unit tests
+cargo build && perl check.pl -p ./target/debug/epsh \
+  -s check-epsh.t                                       # 156/167 mksh conformance
+perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
+```
 
-## What's Not Implemented
+## What's Not Implemented (by design)
 
 - Job control (fg, bg, jobs, process groups)
 - Interactive features (prompt, history, line editing)
 - Aliases
-- Signal trap execution (trap stores handlers but doesn't install signal handlers)
-- `$(<file)` input redirection shorthand
-- `<<<` here-strings
+- Here-strings (`<<<`)
 - Extended globs (`@(...)`, `+(...)`, etc.)
+- Arrays, typeset, select (ksh extensions)
