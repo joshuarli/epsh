@@ -635,17 +635,23 @@ impl Shell {
             }
             return ExitStatus::SUCCESS;
         }
-        if args.len() == 2 {
-            // trap '' SIG or trap - SIG
-            if args[1] == "-" {
-                // Reset all traps
-                self.traps.clear();
-            }
-            return ExitStatus::SUCCESS;
-        }
         // Skip -- if present
         let offset = if args[1] == "--" { 2 } else { 1 };
         if args.len() <= offset {
+            return ExitStatus::SUCCESS;
+        }
+        // POSIX: when only one operand remains (no action), it's a signal name
+        // and the trap is reset to default. e.g. `trap INT` resets SIGINT.
+        if args.len() == offset + 1 {
+            let sig = &args[offset];
+            if sig == "-" {
+                // `trap -` with no signals: print traps (same as bare `trap`)
+                for (sig, action) in &self.traps {
+                    self.write_out(&format!("trap -- '{}' {}\n", action, sig));
+                }
+            } else {
+                self.traps.remove(sig.as_str());
+            }
             return ExitStatus::SUCCESS;
         }
         let action = &args[offset];
