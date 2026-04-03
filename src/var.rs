@@ -146,23 +146,30 @@ impl Variables {
     /// Set a variable to an integer value. Avoids the i64→String→parse roundtrip
     /// by setting both the string representation and the integer cache directly.
     pub fn set_int(&mut self, name: &str, value: i64) -> Result<(), String> {
-        if let Some(existing) = self.vars.get(name)
-            && existing.flags.has(VarFlags::READONLY)
-        {
-            return Err(format!("{name}: readonly variable"));
+        // Fast path: update existing var in-place (avoids name.to_string() alloc)
+        if let Some(existing) = self.vars.get_mut(name) {
+            if existing.flags.has(VarFlags::READONLY) {
+                return Err(format!("{name}: readonly variable"));
+            }
+            existing.int_cache = Some(value);
+            // Reuse existing String allocation when possible
+            let s = existing.value.get_or_insert_with(String::new);
+            s.clear();
+            use std::fmt::Write;
+            let _ = write!(s, "{value}");
+            if existing.flags.has(VarFlags::EXPORT) {
+                // SAFETY: epsh is single-threaded; no concurrent env access.
+                unsafe { env::set_var(name, s.as_str()) };
+            }
+            return Ok(());
         }
 
         let s = value.to_string();
-        let entry = self.vars.entry(name.to_string())
-            .or_insert_with(|| Var::new(None, VarFlags::new()));
-        entry.value = Some(s.clone());
-        entry.int_cache = Some(value);
-
-        if entry.flags.has(VarFlags::EXPORT) {
-            // SAFETY: epsh is single-threaded; no concurrent env access.
-            unsafe { env::set_var(name, &s) };
-        }
-
+        self.vars.insert(name.to_string(), Var {
+            value: Some(s),
+            flags: VarFlags::new(),
+            int_cache: Some(value),
+        });
         Ok(())
     }
 
