@@ -2,7 +2,7 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-156/167 (93%) mksh conformance on dash-passable tests. 9.6k lines, 230 tests (136 unit + 94 integration).
+158/167 (95%) mksh conformance on dash-passable tests. ~10k lines, 237 tests (136 unit + 101 integration).
 
 ## Architecture
 
@@ -155,9 +155,6 @@ Things we know about but haven't implemented:
   don't install actual signal handlers (SIGINT, SIGTERM, etc. use default behavior).
   A coding agent executor might want Ctrl-C handling.
 
-- **set -x (xtrace)**: The flag is stored but no trace output is produced.
-  Useful for debugging agent-generated scripts.
-
 - **Non-UTF-8 input**: Rust strings are UTF-8. Dash handles arbitrary bytes.
   Unlikely to matter for coding agents but technically non-conformant.
 
@@ -167,10 +164,10 @@ Things we know about but haven't implemented:
 ## Testing
 
 ```sh
-cargo test                                              # 230 tests (136 unit + 94 integration)
+cargo test                                              # 237 tests (136 unit + 101 integration)
 cargo test --test integration                           # integration tests only
 cargo build && perl check.pl -p ./target/debug/epsh \
-  -s check-epsh.t                                       # 156/167 mksh conformance
+  -s check-epsh.t                                       # 158/167 mksh conformance
 perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
 ```
 
