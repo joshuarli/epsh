@@ -124,7 +124,37 @@ impl Parser {
                 Self::patch_heredocs_inner(body, bodies, idx);
                 Self::patch_heredoc_redirs(redirs, bodies, idx);
             }
-            _ => {}
+            Command::FuncDef { body, .. } => {
+                Self::patch_heredocs_inner(body, bodies, idx);
+            }
+            Command::If { cond, then_part, else_part, .. } => {
+                Self::patch_heredocs_inner(cond, bodies, idx);
+                Self::patch_heredocs_inner(then_part, bodies, idx);
+                if let Some(e) = else_part {
+                    Self::patch_heredocs_inner(e, bodies, idx);
+                }
+            }
+            Command::While { cond, body, .. } | Command::Until { cond, body, .. } => {
+                Self::patch_heredocs_inner(cond, bodies, idx);
+                Self::patch_heredocs_inner(body, bodies, idx);
+            }
+            Command::For { body, .. } => {
+                Self::patch_heredocs_inner(body, bodies, idx);
+            }
+            Command::Case { arms, .. } => {
+                for arm in arms.iter_mut() {
+                    if let Some(b) = &mut arm.body {
+                        Self::patch_heredocs_inner(b, bodies, idx);
+                    }
+                }
+            }
+            Command::Not(inner) => {
+                Self::patch_heredocs_inner(inner, bodies, idx);
+            }
+            Command::Background { cmd, redirs } => {
+                Self::patch_heredocs_inner(cmd, bodies, idx);
+                Self::patch_heredoc_redirs(redirs, bodies, idx);
+            }
         }
     }
 

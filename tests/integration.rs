@@ -1144,3 +1144,70 @@ mod read_builtin {
         );
     }
 }
+
+mod heredoc_in_compounds {
+    use super::*;
+
+    #[test]
+    fn heredoc_in_function() {
+        assert_output("f() { cat <<EOF\nhello\nEOF\n}; f", "hello\n");
+    }
+
+    #[test]
+    fn heredoc_with_expansion_in_function() {
+        assert_output(
+            "f() { x=world; cat <<EOF\nhello $x\nEOF\n}; f",
+            "hello world\n",
+        );
+    }
+
+    #[test]
+    fn multiple_heredocs_in_function() {
+        assert_output(
+            "f() { cat <<EOF\nfirst\nEOF\ncat <<EOF\nsecond\nEOF\n}; f",
+            "first\nsecond\n",
+        );
+    }
+
+    #[test]
+    fn heredoc_in_nested_function() {
+        assert_output(
+            "f() { g() { cat <<EOF\nnested\nEOF\n}; g; }; f",
+            "nested\n",
+        );
+    }
+
+    #[test]
+    fn heredoc_in_for_loop() {
+        assert_output(
+            "for i in a b; do cat <<EOF\n$i\nEOF\ndone",
+            "a\nb\n",
+        );
+    }
+
+    #[test]
+    fn heredoc_in_if() {
+        assert_output("if true; then cat <<EOF\nyes\nEOF\nfi", "yes\n");
+    }
+
+    #[test]
+    fn heredoc_in_while() {
+        assert_output(
+            "x=1; while [ \"$x\" = 1 ]; do cat <<EOF\nloop\nEOF\nx=0; done",
+            "loop\n",
+        );
+    }
+
+    #[test]
+    fn heredoc_in_case() {
+        assert_output(
+            "case x in x) cat <<EOF\nmatched\nEOF\n;; esac",
+            "matched\n",
+        );
+    }
+
+    #[test]
+    fn function_called_twice_with_heredoc() {
+        assert_output("f() { cat <<EOF\nhi\nEOF\n}; f; f", "hi\nhi\n");
+    }
+}
