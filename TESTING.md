@@ -2,7 +2,7 @@
 
 ## Current Tests
 
-350 unit/integration tests across 9 modules + integration/embedding/API suites:
+362 unit/integration tests across 9 modules + integration/embedding/API suites:
 
 - **lexer** (19): tokenization, quoting, operators, reserved words, comments, escapes
 - **parser** (34): full grammar coverage — simple commands, pipelines, compound commands, case, for, functions, word parts, parameter expansion syntax
@@ -11,7 +11,7 @@
 - **glob** (9): fnmatch pattern matching — wildcards, character classes, ranges, negation, escapes
 - **var** (8): set/get, unset, readonly, scope push/pop, positional params, special params
 - **eval** (32): end-to-end script execution — commands, pipelines, command substitution, here-docs, if/while/for/case, functions, arithmetic, subshells, set -e, test builtin, local vars, trap, signals
-- **integration** (158): oils-spec and oils-posix conformance, builtins, redirections, control flow, xtrace, assignments, encoding, nounset, kill, exec redirects, read EOF, heredocs in compounds
+- **integration** (170): oils-spec and oils-posix conformance, builtins, redirections, control flow, xtrace, assignments, encoding, nounset, kill, exec redirects, read EOF, heredocs in compounds, printf format looping, dot return, fd numbers, set -
 - **embedding** (31): builder, sinks, cancellation, timeout, external handler, cwd isolation
 - **api_stability** (16): public API surface checks
 
