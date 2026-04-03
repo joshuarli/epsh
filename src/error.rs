@@ -39,6 +39,8 @@ pub enum ShellError {
     Runtime { msg: String, span: Span },
     /// Execution was cancelled via the cancel flag
     Cancelled,
+    /// Execution exceeded the configured timeout
+    TimedOut,
 }
 
 impl fmt::Display for ShellError {
@@ -53,6 +55,7 @@ impl fmt::Display for ShellError {
             ShellError::Io(e) => write!(f, "{e}"),
             ShellError::Runtime { msg, span } => write!(f, "{span}: {msg}"),
             ShellError::Cancelled => write!(f, "cancelled"),
+            ShellError::TimedOut => write!(f, "timed out"),
         }
     }
 }

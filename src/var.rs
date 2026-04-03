@@ -76,6 +76,18 @@ impl Default for Variables {
 }
 
 impl Variables {
+    /// Create variables with no inherited environment.
+    pub fn new_clean() -> Self {
+        let mut vars = HashMap::new();
+        vars.insert("IFS".into(), Var::new(Some(" \t\n".into()), VarFlags::new()));
+        Variables {
+            vars,
+            scopes: Vec::new(),
+            positional: Vec::new(),
+            arg0: "epsh".into(),
+        }
+    }
+
     pub fn new() -> Self {
         let mut vars = HashMap::new();
 

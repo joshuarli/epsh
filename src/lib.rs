@@ -1,6 +1,6 @@
 pub mod arith;
 pub mod ast;
-mod builtins;
+pub mod builtins;
 pub mod encoding;
 pub mod error;
 pub mod eval;

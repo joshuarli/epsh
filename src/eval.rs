@@ -60,6 +60,8 @@ pub struct Shell {
     pub(crate) stderr_sink: Option<Arc<Mutex<dyn Write + Send>>>,
     /// PIDs of currently running child processes (for cancellation cleanup).
     pub(crate) child_pids: Vec<i32>,
+    /// Optional execution deadline. When exceeded, shell aborts with TimedOut.
+    timeout: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -85,6 +87,86 @@ impl expand::ShellExpand for Shell {
     }
 }
 
+/// Builder for configuring a Shell instance.
+pub struct ShellBuilder {
+    cwd: Option<PathBuf>,
+    errexit: bool,
+    nounset: bool,
+    xtrace: bool,
+    pipefail: bool,
+    cancel: Option<Arc<AtomicBool>>,
+    stdout_sink: Option<Arc<Mutex<dyn Write + Send>>>,
+    stderr_sink: Option<Arc<Mutex<dyn Write + Send>>>,
+    timeout: Option<std::time::Duration>,
+    env_clear: bool,
+}
+
+impl Default for ShellBuilder {
+    fn default() -> Self { Self::new() }
+}
+
+impl ShellBuilder {
+    pub fn new() -> Self {
+        ShellBuilder {
+            cwd: None,
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            pipefail: false,
+            cancel: None,
+            stdout_sink: None,
+            stderr_sink: None,
+            timeout: None,
+            env_clear: false,
+        }
+    }
+
+    pub fn cwd(mut self, path: PathBuf) -> Self { self.cwd = Some(path); self }
+    pub fn errexit(mut self, v: bool) -> Self { self.errexit = v; self }
+    pub fn nounset(mut self, v: bool) -> Self { self.nounset = v; self }
+    pub fn xtrace(mut self, v: bool) -> Self { self.xtrace = v; self }
+    pub fn pipefail(mut self, v: bool) -> Self { self.pipefail = v; self }
+    pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self { self.cancel = Some(flag); self }
+    pub fn stdout_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stdout_sink = Some(sink); self }
+    pub fn stderr_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stderr_sink = Some(sink); self }
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self { self.timeout = Some(duration); self }
+    /// Don't inherit process environment variables.
+    pub fn env_clear(mut self) -> Self { self.env_clear = true; self }
+
+    pub fn build(self) -> Shell {
+        let vars = if self.env_clear {
+            Variables::new_clean()
+        } else {
+            Variables::new()
+        };
+        let cwd = self.cwd
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        Shell {
+            vars,
+            functions: HashMap::new(),
+            exit_status: ExitStatus::SUCCESS,
+            pid: std::process::id(),
+            cwd,
+            loop_depth: 0,
+            opts: ShellOpts {
+                errexit: self.errexit,
+                nounset: self.nounset,
+                xtrace: self.xtrace,
+                pipefail: self.pipefail,
+            },
+            traps: HashMap::new(),
+            tested: false,
+            in_forked_child: false,
+            ev_exit: false,
+            cancel: self.cancel,
+            stdout_sink: self.stdout_sink,
+            stderr_sink: self.stderr_sink,
+            child_pids: Vec::new(),
+            timeout: self.timeout.map(|d| std::time::Instant::now() + d),
+        }
+    }
+}
+
 impl Default for Shell {
     fn default() -> Self {
         Self::new()
@@ -92,6 +174,10 @@ impl Default for Shell {
 }
 
 impl Shell {
+    pub fn builder() -> ShellBuilder {
+        ShellBuilder::new()
+    }
+
     pub fn new() -> Self {
         Shell {
             vars: Variables::new(),
@@ -109,6 +195,7 @@ impl Shell {
             stdout_sink: None,
             stderr_sink: None,
             child_pids: Vec::new(),
+            timeout: None,
         }
     }
 
@@ -118,12 +205,23 @@ impl Shell {
         self.cancel = Some(flag);
     }
 
-    /// Check if cancellation has been requested.
+    /// Set an execution timeout. The shell will abort with `ShellError::TimedOut`
+    /// when the deadline is exceeded, checked at the same points as cancellation.
+    pub fn set_timeout(&mut self, duration: std::time::Duration) {
+        self.timeout = Some(std::time::Instant::now() + duration);
+    }
+
+    /// Check cancellation flag and timeout deadline.
     fn check_cancel(&self) -> crate::error::Result<()> {
         if let Some(ref flag) = self.cancel
             && flag.load(Ordering::Relaxed)
         {
             return Err(ShellError::Cancelled);
+        }
+        if let Some(deadline) = self.timeout
+            && std::time::Instant::now() >= deadline
+        {
+            return Err(ShellError::TimedOut);
         }
         Ok(())
     }
@@ -174,15 +272,15 @@ impl Shell {
     /// Wait for a child process, polling the cancel flag.
     /// On cancellation, kills the child's process group and returns Cancelled.
     fn wait_child(&mut self, pid: i32) -> crate::error::Result<ExitStatus> {
-        // If no cancel flag, just block
-        if self.cancel.is_none() {
+        // If no cancel flag or timeout, just block
+        if self.cancel.is_none() && self.timeout.is_none() {
             let mut status = 0i32;
             unsafe { sys::waitpid(pid, &mut status, 0); }
             self.child_pids.retain(|&p| p != pid);
             return Ok(ExitStatus::from_wait(status));
         }
 
-        // Poll with WNOHANG, checking cancel between iterations
+        // Poll with WNOHANG, checking cancel/timeout between iterations
         loop {
             let mut status = 0i32;
             let ret = unsafe { sys::waitpid(pid, &mut status, libc::WNOHANG) };
@@ -190,14 +288,12 @@ impl Shell {
                 self.child_pids.retain(|&p| p != pid);
                 return Ok(ExitStatus::from_wait(status));
             }
-            if let Some(ref flag) = self.cancel
-                && flag.load(Ordering::Relaxed)
-            {
-                // Kill and reap
+            if let Err(e) = self.check_cancel() {
+                // Cancel or timeout — kill and reap
                 unsafe { libc::kill(-pid, libc::SIGKILL); }
                 unsafe { sys::waitpid(pid, &mut status, 0); }
                 self.child_pids.retain(|&p| p != pid);
-                return Err(ShellError::Cancelled);
+                return Err(e);
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -265,7 +361,7 @@ impl Shell {
                     self.run_exit_trap();
                     return n;
                 }
-                Err(ShellError::Cancelled) => {
+                Err(ShellError::Cancelled) | Err(ShellError::TimedOut) => {
                     self.kill_children();
                     return ExitStatus::from_signal(2); // 130 = SIGINT
                 }
@@ -854,22 +950,20 @@ impl Shell {
                 }
 
                 // Cancel-aware wait using try_wait
-                let wait_result = if self.cancel.is_some() {
+                let wait_result = if self.cancel.is_some() || self.timeout.is_some() {
                     loop {
                         match child.try_wait() {
                             Ok(Some(status)) => break Ok(status),
                             Ok(None) => {}
                             Err(e) => break Err(e),
                         }
-                        if let Some(ref flag) = self.cancel
-                            && flag.load(Ordering::Relaxed)
-                        {
+                        if let Err(e) = self.check_cancel() {
                             let _ = child.kill();
                             let _ = child.wait();
                             self.child_pids.retain(|&p| p != child_id);
                             for h in handles { let _ = h.join(); }
                             self.restore_redirections(saved);
-                            return Err(ShellError::Cancelled);
+                            return Err(e);
                         }
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
@@ -999,10 +1093,9 @@ impl Shell {
                         last_status = stage_status;
                     }
                 }
-                Err(ShellError::Cancelled) => {
-                    // Kill remaining pipeline children
+                Err(e @ (ShellError::Cancelled | ShellError::TimedOut)) => {
                     self.kill_children();
-                    return Err(ShellError::Cancelled);
+                    return Err(e);
                 }
                 Err(e) => return Err(e),
             }

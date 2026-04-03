@@ -924,39 +924,19 @@ impl Shell {
     }
 }
 
-fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        ":" | "true"
-            | "false"
-            | "echo"
-            | "cd"
-            | "pwd"
-            | "exit"
-            | "return"
-            | "break"
-            | "continue"
-            | "export"
-            | "readonly"
-            | "unset"
-            | "set"
-            | "shift"
-            | "eval"
-            | "."
-            | "source"
-            | "test"
-            | "["
-            | "read"
-            | "local"
-            | "exec"
-            | "command"
-            | "type"
-            | "wait"
-            | "trap"
-            | "umask"
-            | "getopts"
-            | "printf"
-    )
+/// All builtin command names recognized by the shell.
+pub const BUILTIN_NAMES: &[&str] = &[
+    ":", "true", "false", "echo", "printf",
+    "cd", "pwd", "exit", "return", "break", "continue",
+    "export", "readonly", "unset", "set", "shift",
+    "eval", ".", "source", "test", "[",
+    "read", "local", "exec", "command", "type",
+    "wait", "trap", "umask", "getopts",
+];
+
+/// Check if a command name is a shell builtin.
+pub fn is_builtin(name: &str) -> bool {
+    BUILTIN_NAMES.contains(&name)
 }
 
 fn which(name: &str) -> Result<String, ()> {
