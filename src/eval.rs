@@ -76,22 +76,22 @@ pub type ExternalHandler = Box<dyn FnMut(&[String], &[(String, String)]) -> crat
 ///     .build();
 /// ```
 pub struct Shell {
-    pub vars: Variables,
+    pub(crate) vars: Variables,
     /// Defined functions: name → AST body
-    pub functions: HashMap<String, Command>,
+    pub(crate) functions: HashMap<String, Command>,
     /// Last command's exit status ($?)
-    pub exit_status: ExitStatus,
+    pub(crate) exit_status: ExitStatus,
     /// Shell's PID ($$)
-    pub pid: u32,
+    pub(crate) pid: u32,
     /// Current working directory — per-Shell, not process-global.
     /// All relative paths (redirections, glob, source) resolve against this.
-    pub cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
     /// Number of nested loops (for break/continue counting)
     pub(crate) loop_depth: usize,
     /// Shell options
-    pub opts: ShellOpts,
+    pub(crate) opts: ShellOpts,
     /// Trap handlers: signal name → command string
-    pub traps: HashMap<String, String>,
+    pub(crate) traps: HashMap<String, String>,
     /// True when evaluating a condition (if test, while cond, && / || operands).
     /// Suppresses set -e (errexit). Mirrors dash's EV_TESTED flag.
     pub(crate) tested: bool,
@@ -299,6 +299,25 @@ impl Shell {
     pub fn set_timeout(&mut self, duration: std::time::Duration) {
         self.timeout = Some(std::time::Instant::now() + duration);
     }
+
+    /// Variable storage.
+    pub fn vars(&self) -> &Variables { &self.vars }
+    /// Mutable variable storage.
+    pub fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
+    /// Defined functions.
+    pub fn functions(&self) -> &HashMap<String, Command> { &self.functions }
+    /// Last command's exit status (`$?`).
+    pub fn exit_status(&self) -> ExitStatus { self.exit_status }
+    /// Shell's PID (`$$`).
+    pub fn pid(&self) -> u32 { self.pid }
+    /// Current working directory.
+    pub fn cwd(&self) -> &Path { &self.cwd }
+    /// Shell options.
+    pub fn opts(&self) -> &ShellOpts { &self.opts }
+    /// Mutable shell options.
+    pub fn opts_mut(&mut self) -> &mut ShellOpts { &mut self.opts }
+    /// Trap handlers.
+    pub fn traps(&self) -> &HashMap<String, String> { &self.traps }
 
     /// Check cancellation flag and timeout deadline.
     fn check_cancel(&self) -> crate::error::Result<()> {

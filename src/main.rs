@@ -33,9 +33,9 @@ fn main() {
                 // Shell options like -e, -x, etc.
                 for ch in args[i][1..].chars() {
                     match ch {
-                        'e' => shell.opts.errexit = true,
-                        'u' => shell.opts.nounset = true,
-                        'x' => shell.opts.xtrace = true,
+                        'e' => shell.opts_mut().errexit = true,
+                        'u' => shell.opts_mut().nounset = true,
+                        'x' => shell.opts_mut().xtrace = true,
                         _ => {
                             eprintln!("epsh: unknown option: -{ch}");
                             std::process::exit(2);

@@ -82,7 +82,7 @@ fn shell_public_methods() {
     shell.set_external_handler(Box::new(|_args, _env| Ok(error::ExitStatus::SUCCESS)));
 
     // ShellOpts fields
-    shell.opts.interactive = true;
+    shell.opts_mut().interactive = true;
 
     // resolve_path
     let _p: PathBuf = shell.resolve_path("relative");
@@ -94,22 +94,22 @@ fn shell_public_methods() {
 }
 
 #[test]
-fn shell_public_fields() {
+fn shell_accessor_methods() {
     let mut shell = eval::Shell::new();
 
-    // Public fields are accessible
-    let _vars: &var::Variables = &shell.vars;
-    let _funcs: &std::collections::HashMap<String, ast::Command> = &shell.functions;
-    let _status: error::ExitStatus = shell.exit_status;
-    let _pid: u32 = shell.pid;
-    let _cwd: &PathBuf = &shell.cwd;
-    let _opts: &eval::ShellOpts = &shell.opts;
+    // Accessor methods
+    let _vars: &var::Variables = shell.vars();
+    let _funcs: &std::collections::HashMap<String, ast::Command> = shell.functions();
+    let _status: error::ExitStatus = shell.exit_status();
+    let _pid: u32 = shell.pid();
+    let _cwd: &std::path::Path = shell.cwd();
+    let _opts: &eval::ShellOpts = shell.opts();
 
-    // ShellOpts fields
-    shell.opts.errexit = true;
-    shell.opts.nounset = true;
-    shell.opts.xtrace = true;
-    shell.opts.pipefail = true;
+    // ShellOpts fields via opts_mut()
+    shell.opts_mut().errexit = true;
+    shell.opts_mut().nounset = true;
+    shell.opts_mut().xtrace = true;
+    shell.opts_mut().pipefail = true;
 }
 
 #[test]

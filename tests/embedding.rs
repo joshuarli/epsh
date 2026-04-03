@@ -19,7 +19,7 @@ mod builder {
     #[test]
     fn default_builder() {
         let shell = Shell::builder().build();
-        assert_eq!(shell.exit_status, ExitStatus::SUCCESS);
+        assert_eq!(shell.exit_status(), ExitStatus::SUCCESS);
     }
 
     #[test]
@@ -36,9 +36,9 @@ mod builder {
             .nounset(true)
             .pipefail(true)
             .build();
-        assert!(shell.opts.errexit);
-        assert!(shell.opts.nounset);
-        assert!(shell.opts.pipefail);
+        assert!(shell.opts().errexit);
+        assert!(shell.opts().nounset);
+        assert!(shell.opts().pipefail);
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod cwd_isolation {
         let mut shell = Shell::builder().cwd(PathBuf::from("/")).build();
         shell.run_program(&parse("cd /tmp"));
         // macOS: /tmp → /private/tmp
-        let cwd = shell.cwd.to_string_lossy().to_string();
+        let cwd = shell.cwd().to_string_lossy().to_string();
         assert!(cwd == "/tmp" || cwd == "/private/tmp");
     }
 }
@@ -395,8 +395,8 @@ mod variables {
     fn exit_status_accessible() {
         let mut shell = Shell::new();
         shell.run_program(&parse("false"));
-        assert_eq!(shell.exit_status, ExitStatus::FAILURE);
+        assert_eq!(shell.exit_status(), ExitStatus::FAILURE);
         shell.run_program(&parse("true"));
-        assert_eq!(shell.exit_status, ExitStatus::SUCCESS);
+        assert_eq!(shell.exit_status(), ExitStatus::SUCCESS);
     }
 }
