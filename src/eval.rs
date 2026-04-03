@@ -51,7 +51,7 @@ use crate::var::Variables;
 /// Receives expanded args (args[0] is the command name) and prefix assignment
 /// environment pairs. Redirections are already applied to fds before the
 /// handler is called. Return the exit status of the command.
-pub type ExternalHandler = Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus>>;
+pub type ExternalHandler = Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus> + Send>;
 
 /// A POSIX shell interpreter instance.
 ///
