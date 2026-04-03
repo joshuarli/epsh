@@ -349,7 +349,11 @@ impl Shell {
                 return Err(ShellError::Exit(ExitStatus::NOT_FOUND));
             }
         };
-        self.run_inline(&content)
+        // Catch return — it exits the dot script, not the shell
+        match self.run_inline(&content) {
+            Err(ShellError::Return(n)) => Ok(n),
+            other => other,
+        }
     }
 
     fn builtin_test(&self, args: &[String]) -> ExitStatus {
