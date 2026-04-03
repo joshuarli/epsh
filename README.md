@@ -30,14 +30,16 @@ exit code.
 
 ## What you get
 
-- **95% POSIX conformance** on the mksh test suite (158/167 dash-passable tests)
-- **Per-shell working directory** (`Shell.cwd`) — no process-global state, safe for concurrent use
-- **Cancellation** via `Arc<AtomicBool>` — kills child process groups within milliseconds
-- **Output capture** via `Arc<Mutex<dyn Write + Send>>` sinks — no pipe wrangling
+- **96% POSIX conformance** on the mksh test suite (161/167 dash-passable tests)
+- **Builder API** — configure shell options, sinks, timeouts, cancellation in one chain
+- **Per-shell working directory** — no process-global state, safe for concurrent use
+- **Cancellation + timeout** — kills child process groups within milliseconds
+- **Output capture** via sinks — no pipe wrangling
 - **Parse-then-execute** — inspect the AST between parsing and execution
 - **Process group isolation** — every child gets `setpgid`; cancellation kills the tree
-- **~10k lines of Rust + libc** — no other dependencies
-- 237 tests (unit + integration), zero clippy warnings
+- **Fork-free command substitution** — `$(echo ...)` runs in-process, 3.6x faster than dash
+- **10k lines of Rust + libc** — no other dependencies
+- 290 tests, zero clippy warnings
 
 ## Usage
 
@@ -46,9 +48,19 @@ use epsh::eval::Shell;
 use epsh::parser::Parser;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::path::PathBuf;
+use std::time::Duration;
 
-let mut shell = Shell::new();
-shell.set_cwd(PathBuf::from("/some/project"));
+// Builder API — recommended for embedders
+let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
+let cancel = Arc::new(AtomicBool::new(false));
+let mut shell = Shell::builder()
+    .cwd(PathBuf::from("/some/project"))
+    .errexit(true)
+    .pipefail(true)
+    .stdout_sink(stdout.clone())
+    .cancel_flag(cancel.clone())
+    .timeout(Duration::from_secs(120))
+    .build();
 
 // One-shot execution
 let exit_code = shell.run_script("cargo test 2>&1");
@@ -58,17 +70,29 @@ let program = Parser::new("rm -rf /tmp/build").parse().unwrap();
 // ... inspect program.commands, check permissions ...
 let status = shell.run_program(&program);
 
-// Cancellation
-let cancel = Arc::new(AtomicBool::new(false));
-shell.set_cancel_flag(cancel.clone());
-// From another thread: cancel.store(true, Ordering::Relaxed);
-
 // Output capture
-let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
-shell.set_stdout_sink(stdout.clone());
-shell.run_script("echo hello");
 let output = String::from_utf8_lossy(&stdout.lock().unwrap());
+
+// Builtin detection (for permission systems)
+use epsh::builtins::{is_builtin, BUILTIN_NAMES};
+assert!(is_builtin("echo"));
+assert!(!is_builtin("rm"));
 ```
+
+### Builder options
+
+| Method | Description |
+|--------|-------------|
+| `.cwd(PathBuf)` | Working directory (default: process cwd) |
+| `.errexit(bool)` | Exit on error (`set -e`) |
+| `.nounset(bool)` | Error on unset variables (`set -u`) |
+| `.xtrace(bool)` | Print commands before execution (`set -x`) |
+| `.pipefail(bool)` | Return highest nonzero pipeline status |
+| `.stdout_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stdout |
+| `.stderr_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stderr |
+| `.cancel_flag(Arc<AtomicBool>)` | Cancellation flag |
+| `.timeout(Duration)` | Execution deadline |
+| `.env_clear()` | Don't inherit process environment |
 
 ## CLI
 
@@ -79,6 +103,19 @@ echo 'echo hello' | epsh      # read from stdin (pipe)
 epsh                           # no args + tty → prints usage
 ```
 
+## Performance
+
+Fork-dominated operations (the typical coding agent workload) are at parity
+with dash:
+
+| Operation | vs dash | Notes |
+|-----------|---------|-------|
+| Builtin command substitution | **3.6x faster** | Fork-free `$(echo ...)` |
+| Heredocs | **0.8x** | Faster than dash |
+| Pipelines | **1.1x** | posix_spawn, exec-direct |
+| External commands | **1.1x** | At parity |
+| Tight arithmetic loops | **~28x** | String allocation dominated |
+
 ## Design
 
 epsh's conformance target is dash, the Debian default `/bin/sh`. The
@@ -87,13 +124,15 @@ guessing at POSIX spec wording. Key mechanisms ported from dash:
 
 - Single-pass word tokenization with syntax-context tracking
 - `EV_TESTED` errexit suppression in conditionals and `&&`/`||`
-- `in_forked_child` to prevent double-fork pipe fd leaks
+- `in_forked_child` / `ev_exit` to prevent double-fork and enable exec-direct
 - Heredoc body reading at newlines (not at parse time)
 - `$((..))` arithmetic with short-circuit `noeval` for ternary/logical ops
+- CTLESC escape marker for preserving backslash semantics through expansion
+- PUA-based byte encoding for non-UTF-8 data preservation
 
 Where we diverged from dash: typed AST instead of control-character strings,
 `Result<T, ShellError>` instead of setjmp/longjmp, `ExitStatus` newtype
-instead of bare integers.
+with private field and type-safe methods.
 
 ## Not implemented (by design)
 
@@ -108,10 +147,12 @@ doesn't need them.
 ## Testing
 
 ```sh
-cargo test                      # 237 tests (136 unit + 101 integration)
+cargo test                      # 290 tests (141 unit + 27 embedding + 122 integration)
+cargo test --test embedding     # embedding API tests
+cargo test --test integration   # shell behavior tests
 cargo build && perl check.pl \
   -p ./target/debug/epsh \
-  -s check-epsh.t              # 158/167 mksh conformance
+  -s check-epsh.t              # 161/167 mksh conformance
 ```
 
 ## License

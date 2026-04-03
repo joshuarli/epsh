@@ -2,26 +2,27 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-158/167 (95%) mksh conformance on dash-passable tests. ~10k lines, 237 tests (136 unit + 101 integration).
+161/167 (96%) mksh conformance on dash-passable tests. 10k lines, 290 tests (141 unit + 27 embedding + 122 integration).
 
 ## Architecture
 
 ```
 src/
-  lib.rs          Public API
-  main.rs         CLI binary: epsh [-c cmd] [-e] [script.sh]
-  ast.rs          (214) AST types: Command, Word, WordPart, Redir, ParamExpr
-  lexer.rs        (1805) Single-pass tokenizer with unified word-part builder
+  lib.rs          Public API, module declarations
+  main.rs         (87)   CLI binary: epsh [-c cmd] [-e] [script.sh]
+  ast.rs          (214)  AST types: Command, Word, WordPart, Redir, ParamExpr
+  lexer.rs        (1822) Single-pass tokenizer with unified word-part builder
   parser.rs       (1963) Recursive-descent parser, heredoc body reading
-  eval.rs         (1274) Shell struct, eval dispatch, pipelines, subshells, comsub
-  builtins.rs     (1027) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
-  expand.rs       (1093) Word expansion: tilde, param, arith, IFS split, glob, patterns
-  arith.rs        (809)  $((…)) evaluator with short-circuit (noeval)
-  var.rs          (315)  Variable storage with scope stack
-  glob.rs         (291)  Custom fnmatch + pathname expansion (cwd-aware)
+  eval.rs         (1540) Shell struct, ShellBuilder, eval dispatch, pipelines, comsub
+  builtins.rs     (1007) 30 builtins: echo, cd, test, read, set, trap, printf, ...
+  expand.rs       (1095) Word expansion: tilde, param, arith, IFS split, glob, patterns
+  arith.rs        (815)  $((…)) evaluator with short-circuit (noeval), int var cache
+  var.rs          (345)  Variable storage with scope stack, integer cache
+  glob.rs         (316)  Custom fnmatch + pathname expansion (cwd-aware)
   redirect.rs     (151)  FD save/restore for redirections
-  test_cmd.rs     (398)  POSIX test/[ recursive-descent evaluator
-  error.rs        (138)  ShellError enum, ExitStatus newtype, Result alias
+  test_cmd.rs     (403)  POSIX test/[ recursive-descent evaluator
+  error.rs        (141)  ShellError enum, ExitStatus newtype, Result alias
+  encoding.rs     (108)  PUA-based byte preservation for non-UTF-8 data
   sys.rs          (33)   Thin libc wrappers
 ```
 
@@ -30,27 +31,30 @@ src/
 ```rust
 use epsh::eval::Shell;
 use epsh::parser::Parser;
+use epsh::builtins::{is_builtin, BUILTIN_NAMES};
 
-let mut shell = Shell::new();
-
-// Per-shell working directory (thread-safe, no process-global state)
-shell.set_cwd(PathBuf::from("/some/dir"));
-
-// Cancellation via shared flag
-let cancel = Arc::new(AtomicBool::new(false));
-shell.set_cancel_flag(cancel.clone());
-// cancel.store(true, Ordering::Relaxed);  // aborts execution
-
-// Output capture via sinks
-let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
-shell.set_stdout_sink(stdout.clone());
+// Builder pattern — recommended for embedders
+let mut shell = Shell::builder()
+    .cwd(PathBuf::from("/project"))
+    .errexit(true)
+    .pipefail(true)
+    .stdout_sink(stdout.clone())
+    .stderr_sink(stderr.clone())
+    .cancel_flag(cancel.clone())
+    .timeout(Duration::from_secs(120))
+    .env_clear()
+    .build();
 
 // Parse once, execute separately (for permission checking)
 let program = Parser::new("echo hello").parse().unwrap();
 let status = shell.run_program(&program);
 
-// Or one-shot
+// One-shot
 let exit_code = shell.run_script("echo hello");
+
+// Builtin detection for permission systems
+assert!(is_builtin("echo"));
+assert!(!is_builtin("rm"));
 ```
 
 ## Design Lineage — What We Actually Took
@@ -155,24 +159,28 @@ Things we know about but haven't implemented:
   don't install actual signal handlers (SIGINT, SIGTERM, etc. use default behavior).
   A coding agent executor might want Ctrl-C handling.
 
-- **Non-UTF-8 input**: Rust strings are UTF-8. Dash handles arbitrary bytes.
-  Unlikely to matter for coding agents but technically non-conformant.
-
 - **Heredoc in nested function definitions**: The heredoc body lifecycle doesn't
   survive through function AST storage and re-execution. Niche edge case.
+
+- **`command -v`**: Not yet implemented (the `-v` flag is skipped). Used for
+  checking command availability in scripts.
 
 ## Testing
 
 ```sh
-cargo test                                              # 237 tests (136 unit + 101 integration)
-cargo test --test integration                           # integration tests only
+cargo test                                              # 290 tests
+cargo test --test embedding                             # embedding API tests (27)
+cargo test --test integration                           # shell behavior tests (122)
 cargo build && perl check.pl -p ./target/debug/epsh \
-  -s check-epsh.t                                       # 158/167 mksh conformance
+  -s check-epsh.t                                       # 161/167 mksh conformance
+sh tests/stress/run.sh ./target/debug/epsh dash         # performance vs dash
 perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
 ```
 
-Integration tests in `tests/integration.rs` cover builtins, expansion, control flow,
-redirections, assignments, and POSIX edge cases (adapted from oils/spec/posix.test.sh).
+- `tests/embedding.rs` — builder, cancellation, timeout, sinks, cwd isolation, builtins API
+- `tests/integration.rs` — builtins, expansion, control flow, redirections, assignments,
+  POSIX edge cases (adapted from oils/spec/posix.test.sh and mksh test suite)
+- `tests/stress/` — 8 benchmark scripts comparing epsh vs dash
 
 ## What's Not Implemented (by design)
 
