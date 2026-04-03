@@ -1,8 +1,14 @@
 [package]
 name = "epsh"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
-description = "Embeddable POSIX shell"
+description = "Embeddable POSIX shell for Rust — built for coding agents"
+license = "MIT"
+repository = "https://github.com/joshuarli/epsh"
+readme = "README.md"
+keywords = ["shell", "posix", "embedded", "scripting"]
+categories = ["command-line-utilities", "os::unix-apis"]
+exclude = ["check.t", "check.pl", "check-epsh.t", "filter-tests.pl", "tests/stress/", "initial-plan.md", "integration-plan.md", "spec.md", "PLAN.md"]
 
 [dependencies]
 libc = "0.2.184"
