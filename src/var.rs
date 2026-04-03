@@ -32,6 +32,16 @@ impl VarFlags {
 pub struct Var {
     pub value: Option<String>,
     pub flags: VarFlags,
+    /// Cached integer parse of value. Avoids repeated string→i64 conversion
+    /// in arithmetic and test builtins. Updated on every set.
+    int_cache: Option<i64>,
+}
+
+impl Var {
+    fn new(value: Option<String>, flags: VarFlags) -> Self {
+        let int_cache = value.as_deref().and_then(|s| s.parse::<i64>().ok());
+        Var { value, flags, int_cache }
+    }
 }
 
 /// Saved variable state for scope restoration.
@@ -71,28 +81,14 @@ impl Variables {
 
         // Import environment variables
         for (key, value) in env::vars() {
-            vars.insert(
-                key,
-                Var {
-                    value: Some(value),
-                    flags: {
-                        let mut f = VarFlags::new();
-                        f.set(VarFlags::EXPORT);
-                        f
-                    },
-                },
-            );
+            let mut f = VarFlags::new();
+            f.set(VarFlags::EXPORT);
+            vars.insert(key, Var::new(Some(value), f));
         }
 
         // Set default IFS
         if !vars.contains_key("IFS") {
-            vars.insert(
-                "IFS".into(),
-                Var {
-                    value: Some(" \t\n".into()),
-                    flags: VarFlags::new(),
-                },
-            );
+            vars.insert("IFS".into(), Var::new(Some(" \t\n".into()), VarFlags::new()));
         }
 
         Variables {
@@ -116,15 +112,41 @@ impl Variables {
             return Err(format!("{name}: readonly variable"));
         }
 
-        let entry = self.vars.entry(name.to_string()).or_insert_with(|| Var {
-            value: None,
-            flags: VarFlags::new(),
-        });
+        let entry = self.vars.entry(name.to_string())
+            .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.value = Some(value.to_string());
+        entry.int_cache = value.parse::<i64>().ok();
 
         // Sync to process environment if exported
         if entry.flags.has(VarFlags::EXPORT) {
             unsafe { env::set_var(name, value) };
+        }
+
+        Ok(())
+    }
+
+    /// Get a variable's cached integer value (if it parses as i64).
+    pub fn get_int(&self, name: &str) -> Option<i64> {
+        self.vars.get(name).and_then(|v| v.int_cache)
+    }
+
+    /// Set a variable to an integer value. Avoids the i64→String→parse roundtrip
+    /// by setting both the string representation and the integer cache directly.
+    pub fn set_int(&mut self, name: &str, value: i64) -> Result<(), String> {
+        if let Some(existing) = self.vars.get(name)
+            && existing.flags.has(VarFlags::READONLY)
+        {
+            return Err(format!("{name}: readonly variable"));
+        }
+
+        let s = value.to_string();
+        let entry = self.vars.entry(name.to_string())
+            .or_insert_with(|| Var::new(None, VarFlags::new()));
+        entry.value = Some(s.clone());
+        entry.int_cache = Some(value);
+
+        if entry.flags.has(VarFlags::EXPORT) {
+            unsafe { env::set_var(name, &s) };
         }
 
         Ok(())
@@ -144,10 +166,8 @@ impl Variables {
 
     /// Mark a variable as exported.
     pub fn export(&mut self, name: &str) {
-        let entry = self.vars.entry(name.to_string()).or_insert_with(|| Var {
-            value: None,
-            flags: VarFlags::new(),
-        });
+        let entry = self.vars.entry(name.to_string())
+            .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::EXPORT);
         if let Some(ref value) = entry.value {
             unsafe { env::set_var(name, value) };
@@ -156,10 +176,8 @@ impl Variables {
 
     /// Mark a variable as readonly.
     pub fn set_readonly(&mut self, name: &str) {
-        let entry = self.vars.entry(name.to_string()).or_insert_with(|| Var {
-            value: None,
-            flags: VarFlags::new(),
-        });
+        let entry = self.vars.entry(name.to_string())
+            .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::READONLY);
     }
 

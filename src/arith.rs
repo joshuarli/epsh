@@ -333,6 +333,11 @@ impl<'a> ArithParser<'a> {
     }
 
     fn get_var(&self, name: &str) -> i64 {
+        // Fast path: check integer cache first (avoids string→int parse)
+        if let Some(n) = self.vars.get_int(name) {
+            return n;
+        }
+        // Slow path: special params ($?, $$, $#) and non-cached vars
         self.vars
             .get_special(name, self.exit_status, self.shell_pid)
             .or_else(|| self.vars.get(name).map(String::from))
@@ -342,7 +347,8 @@ impl<'a> ArithParser<'a> {
 
     fn set_var(&mut self, name: &str, value: i64) {
         if !self.noeval {
-            let _ = self.vars.set(name, &value.to_string());
+            // Use set_int to avoid i64→String→parse roundtrip
+            let _ = self.vars.set_int(name, value);
         }
     }
 
