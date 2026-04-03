@@ -386,7 +386,7 @@ impl Shell {
         // Read a line char-by-char from fd 0 (works with redirections)
         let mut line = String::new();
         let mut buf = [0u8; 1];
-        let mut got_data = false;
+        let mut hit_eof = true; // assume EOF until we see a newline
         let mut continued = false;
         loop {
             // SAFETY: fd 0 (stdin) is valid; buf is a live 1-byte array.
@@ -394,13 +394,13 @@ impl Shell {
             if n <= 0 {
                 break; // EOF or error
             }
-            got_data = true;
             let ch = buf[0] as char;
             if ch == '\n' {
                 if continued {
                     continued = false;
                     continue;
                 }
+                hit_eof = false;
                 break;
             }
             if ch == '\\' && !raw_mode {
@@ -423,8 +423,8 @@ impl Shell {
             line.push(ch);
         }
 
-        if !got_data {
-            // EOF: set variables to empty
+        if hit_eof && line.is_empty() {
+            // Pure EOF with no data: set variables to empty
             for name in &var_names {
                 let _ = self.vars.set(name, "");
             }
@@ -475,7 +475,8 @@ impl Shell {
                 let _ = self.vars.set(name, value);
             }
         }
-        ExitStatus::SUCCESS
+        // POSIX: return >0 if EOF was detected, even if data was read
+        if hit_eof { ExitStatus::FAILURE } else { ExitStatus::SUCCESS }
     }
 
     fn builtin_local(&mut self, args: &[String]) -> ExitStatus {

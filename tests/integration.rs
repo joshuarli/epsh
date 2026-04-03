@@ -1096,3 +1096,51 @@ mod exec_redirects {
         let _ = std::fs::remove_file(&tmp);
     }
 }
+
+mod read_builtin {
+    use super::*;
+
+    #[test]
+    fn read_normal_line() {
+        assert_output("echo hello | { read x; echo $x; }", "hello\n");
+    }
+
+    #[test]
+    fn read_eof_no_data() {
+        assert_stdout_status("printf '' | { read x; echo \"x=$x\"; }", "x=\n", 0);
+    }
+
+    #[test]
+    fn read_eof_partial_data() {
+        // read should assign the partial data but return 1
+        let (stdout, _, _) = run("printf partial | { read x; echo \"x=$x status=$?\"; }");
+        assert_eq!(stdout, "x=partial status=1\n");
+    }
+
+    #[test]
+    fn read_while_loop_eof() {
+        // while read should process all complete lines, stop at EOF
+        let (stdout, _, code) = run(
+            "printf 'a\\nb\\n' | { n=0; while read line; do n=$((n+1)); done; echo $n; }"
+        );
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "2\n");
+    }
+
+    #[test]
+    fn read_while_loop_partial_last_line() {
+        // The partial last line is available after the loop
+        let (stdout, _, _) = run(
+            "printf 'a\\nb\\npartial' | { while read line; do echo $line; done; echo \"last=$line\"; }"
+        );
+        assert_eq!(stdout, "a\nb\nlast=partial\n");
+    }
+
+    #[test]
+    fn read_multiple_vars() {
+        assert_output(
+            "echo 'one two three four' | { read a b c; echo \"a=$a b=$b c=$c\"; }",
+            "a=one b=two c=three four\n"
+        );
+    }
+}
