@@ -256,6 +256,10 @@ impl Shell {
                 // Remaining args become positional parameters
                 self.vars.positional = args[i..].to_vec();
                 return ExitStatus::SUCCESS;
+            } else if arg == "-" {
+                // POSIX: bare "set -" turns off -x and -v
+                self.opts.xtrace = false;
+                i += 1;
             } else if (arg == "-o" || arg == "+o") && i + 1 < args.len() {
                 let enable = arg == "-o";
                 i += 1;
