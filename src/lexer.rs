@@ -1471,33 +1471,34 @@ impl Lexer {
                 }
             }
 
-            // For unquoted heredocs, \<newline> is continuation — if line ends
-            // with \, strip the backslash and join with the next physical line.
-            // The joined result is checked as one logical line for delimiter matching.
-            if !heredoc.quoted && line.ends_with('\\') {
-                line.pop(); // remove trailing backslash
-                // Don't break — keep accumulating into `line` by reading another line
-                // Strip leading tabs again if <<-
-                if heredoc.strip_tabs {
-                    while self.peek_raw() == Some('\t') {
-                        self.advance_raw();
+            // For unquoted heredocs, \<newline> is continuation ONLY if the
+            // trailing backslash count is odd (even = escaped backslashes).
+            if !heredoc.quoted {
+                let trailing_bs = line.chars().rev().take_while(|&c| c == '\\').count();
+                if trailing_bs % 2 == 1 {
+                    // Odd trailing backslashes → last one is continuation
+                    line.pop(); // remove the continuation backslash
+                    // Strip leading tabs if <<-
+                    if heredoc.strip_tabs {
+                        while self.peek_raw() == Some('\t') {
+                            self.advance_raw();
+                        }
                     }
-                }
-                // Read the continuation into the same line buffer
-                loop {
-                    match self.advance_raw() {
-                        None => break,
-                        Some('\n') => break,
-                        Some(c) => line.push(c),
+                    // Read the next physical line into the same buffer
+                    loop {
+                        match self.advance_raw() {
+                            None => break,
+                            Some('\n') => break,
+                            Some(c) => line.push(c),
+                        }
                     }
-                }
-                // Check again for continuation (could be multi-line)
-                if !heredoc.quoted && line.ends_with('\\') {
-                    // Recursive continuation — handle by looping
-                    // For simplicity, just store and continue the outer loop
-                    line.pop();
-                    body.push_str(&line);
-                    continue;
+                    // Recheck for continuation (multi-line)
+                    let new_trailing = line.chars().rev().take_while(|&c| c == '\\').count();
+                    if new_trailing % 2 == 1 {
+                        line.pop();
+                        body.push_str(&line);
+                        continue;
+                    }
                 }
             }
 
