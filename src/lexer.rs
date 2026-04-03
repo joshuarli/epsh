@@ -971,7 +971,10 @@ impl Lexer {
                 Some('\\') => {
                     self.advance(); // consume backslash
                     if let Some(c) = self.advance() {
-                        if in_dquote && matches!(c, '$' | '`' | '"' | '\\' | '\n') {
+                        // Inside ${...}, \} always escapes } (prevents closing the expansion)
+                        if c == '}' {
+                            literal.push(c);
+                        } else if in_dquote && matches!(c, '$' | '`' | '"' | '\\' | '\n') {
                             if c != '\n' {
                                 literal.push(c);
                             }
