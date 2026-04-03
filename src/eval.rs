@@ -487,7 +487,9 @@ impl Shell {
             expanded_args.extend(self.expand_fields(arg)?);
         }
 
-        // No command name: just apply assignments to the shell environment
+        // No command name: just apply assignments to the shell environment.
+        // Return current exit_status (may have been set by command substitutions
+        // during argument expansion — e.g., `$(false)` with empty result).
         if expanded_args.is_empty() {
             for assign in assigns {
                 let value = self.expand_string(&assign.value)?;
@@ -495,7 +497,7 @@ impl Shell {
                     .set(&assign.name, &value)
                     .map_err(|msg| ShellError::Runtime { msg, span })?;
             }
-            return Ok(ExitStatus::SUCCESS);
+            return Ok(self.exit_status);
         }
 
         let cmd_name = &expanded_args[0];
@@ -747,6 +749,32 @@ impl Shell {
 
     /// Execute a command substitution and return its output.
     pub fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
+        // $(<file) optimization: read file directly without forking
+        if let Command::Simple { assigns, args, redirs, .. } = cmd
+            && assigns.is_empty() && args.is_empty() && redirs.len() == 1
+            && let RedirKind::Input(ref word) = redirs[0].kind
+        {
+                    let filename = self.expand_string(word)?;
+                    match std::fs::read_to_string(&filename) {
+                        Ok(mut content) => {
+                            // Remove trailing newlines (like command substitution)
+                            while content.ends_with('\n') {
+                                content.pop();
+                            }
+                            self.exit_status = ExitStatus::SUCCESS;
+                            return Ok(content);
+                        }
+                        Err(e) => {
+                            eprintln!("epsh: {filename}: {e}");
+                            self.exit_status = ExitStatus::FAILURE;
+                            return Err(ShellError::Runtime {
+                                msg: format!("{filename}: {e}"),
+                                span: redirs[0].span,
+                            });
+                        }
+                    }
+        }
+
         let mut fds = [0i32; 2];
         unsafe {
             if sys::pipe(fds.as_mut_ptr()) != 0 {

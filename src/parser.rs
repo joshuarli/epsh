@@ -1088,7 +1088,8 @@ fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<Wo
                 // Accumulate literal text
                 let start = i;
                 while i < chars.len()
-                    && !matches!(chars[i], '"' | '$' | '`' | '\\')
+                    && !matches!(chars[i], '$' | '`' | '\\')
+                    && (is_heredoc || chars[i] != '"')
                     && (in_dquote || chars[i] != '\'')
                     && !(chars[i] == '~' && i == 0)
                 {

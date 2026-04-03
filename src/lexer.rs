@@ -1143,9 +1143,9 @@ impl Lexer {
                     return Ok(WordPart::Backtick(Box::new(cmd)));
                 }
                 Some('\\') => {
-                    // In backticks, backslash only escapes $, `, and \
+                    // In backticks, backslash escapes $, `, \, and " (when in dquotes)
                     if let Some(c) = self.advance() {
-                        if matches!(c, '$' | '`' | '\\') {
+                        if matches!(c, '$' | '`' | '\\' | '"') {
                             content.push(c);
                         } else {
                             content.push('\\');
