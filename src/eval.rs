@@ -336,6 +336,8 @@ impl Shell {
         // Only fires from "leaf" nodes (simple commands, pipelines, subshells)
         // where checkexit = EV_TESTED. Compound commands (if, while, for, etc.)
         // propagate status but don't trigger errexit directly.
+        // Bang (!) pipelines suppress errexit on the inverted result (POSIX).
+        let is_bang = matches!(cmd, Command::Pipeline { bang: true, .. });
         let is_leaf = matches!(
             cmd,
             Command::Simple { .. }
@@ -343,7 +345,7 @@ impl Shell {
                 | Command::Subshell { .. }
                 | Command::Background { .. }
         );
-        if self.opts.errexit && is_leaf && !self.tested && !status.success() {
+        if self.opts.errexit && is_leaf && !self.tested && !is_bang && !status.success() {
             return Err(ShellError::Exit(status));
         }
 
@@ -369,7 +371,8 @@ impl Shell {
                 bang,
                 span: _,
             } => {
-                // bang (!) suppresses errexit, like dash's EV_TESTED
+                // bang (!) suppresses errexit for both the inner pipeline
+                // AND the inverted result (POSIX requirement).
                 let saved = self.tested;
                 if *bang {
                     self.tested = true;

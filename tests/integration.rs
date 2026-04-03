@@ -735,7 +735,7 @@ mod glob_files {
         assert_eq!(stdout, "abc cbc\n");
     }
 
-    /// glob-range-1 subset: ranges and special chars in brackets
+    /// glob-range-1: ranges and special chars in brackets
     #[test]
     fn glob_bracket_ranges() {
         let dir = tempfile::tempdir().unwrap();
@@ -766,5 +766,166 @@ mod glob_files {
         // [--1]* — range from - to 1 (ASCII 45-49)
         let (stdout, _, _) = run_in(dir.path(), "echo [--1]*");
         assert_eq!(stdout, "-bc 0bc 1bc\n");
+    }
+}
+
+/// Tests adapted from oils/spec/ — POSIX-compatible edge cases
+mod oils_spec {
+    use super::*;
+
+    #[test]
+    fn fatal_error_question_mark() {
+        // Standalone ${a?msg} is fatal
+        let (stdout, _, code) = run("echo ${a?bc}; echo blah");
+        assert_eq!(stdout, "");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn readonly_var_is_fatal() {
+        let (stdout, _, code) = run("readonly abc=123; abc=def; echo status=$?");
+        assert_eq!(stdout, "");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn var_and_func_same_name() {
+        assert_output(
+            "potato() { echo hello; }; potato=42; echo $potato; potato",
+            "42\nhello\n",
+        );
+    }
+
+    #[test]
+    fn for_loop_newline_before_in() {
+        assert_output(
+            "for i\nin one two three\ndo echo $i\ndone",
+            "one\ntwo\nthree\n",
+        );
+    }
+
+    #[test]
+    fn comsub_case_in_subshell() {
+        // Use (pattern) form — bare pattern) inside $() is ambiguous with closing )
+        assert_output(
+            "echo $(foo=a; case $foo in ([0-9]) echo number;; ([a-z]) echo letter;; esac)",
+            "letter\n",
+        );
+    }
+
+    #[test]
+    fn comsub_word_part() {
+        assert_output(
+            "foo=FOO; echo $(echo $foo)bar$(echo $foo)",
+            "FOObarFOO\n",
+        );
+    }
+
+    #[test]
+    fn backtick_word_part() {
+        assert_output(
+            "foo=FOO; echo `echo $foo`bar`echo $foo`",
+            "FOObarFOO\n",
+        );
+    }
+
+    #[test]
+    fn making_command_from_comsub() {
+        assert_output("$(echo ec)$(echo ho) split builtin", "split builtin\n");
+    }
+
+    #[test]
+    fn comsub_exit_code() {
+        assert_output(
+            "echo $(echo x; exit 33); echo $?; x=$(echo x; exit 33); echo $?",
+            "x\n0\n33\n",
+        );
+    }
+
+    #[test]
+    fn empty_comsub() {
+        // Empty $() vanishes in unquoted context — -$()- becomes --
+        assert_output("echo -$()-  .$(). ", "-- ..\n");
+    }
+
+    #[test]
+    fn errexit_aborts_early() {
+        assert_stdout_status("set -o errexit; false; echo done", "", 1);
+    }
+
+    #[test]
+    fn errexit_nonexistent_command() {
+        assert_stdout_status("set -o errexit; nonexistent__ZZ; echo done", "", 127);
+    }
+
+    #[test]
+    fn errexit_brace_group() {
+        assert_stdout_status(
+            "set -o errexit; { echo one; false; echo two; }",
+            "one\n",
+            1,
+        );
+    }
+
+    #[test]
+    fn errexit_if_suppressed() {
+        assert_output(
+            "set -o errexit\nif { echo one; false; echo two; }; then\n  echo three\nfi\necho four",
+            "one\ntwo\nthree\nfour\n",
+        );
+    }
+
+    #[test]
+    fn errexit_with_bang() {
+        assert_output(
+            "set -o errexit; echo one; ! true; echo two; ! false; echo three",
+            "one\ntwo\nthree\n",
+        );
+    }
+
+    #[test]
+    fn errexit_subshell() {
+        assert_stdout_status(
+            "set -o errexit; ( echo one; false; echo two; ); echo three",
+            "one\n",
+            1,
+        );
+    }
+
+    #[test]
+    fn assignment_no_word_splitting() {
+        assert_output(
+            r#"words='one two'; a=$words; echo "$a""#,
+            "one two\n",
+        );
+    }
+
+    #[test]
+    fn assignment_no_glob() {
+        assert_output(
+            r#"a='*.nope'; b=$a; echo "$b""#,
+            "*.nope\n",
+        );
+    }
+
+    #[test]
+    fn empty_assignment() {
+        assert_output(r#"EMPTY=; echo "[$EMPTY]""#, "[]\n");
+    }
+
+    #[test]
+    fn ifs_custom_delimiter() {
+        assert_output(
+            "IFS=x; X='onextwoxxthree'; y=$X; echo $y",
+            "one two  three\n",
+        );
+    }
+
+    #[test]
+    fn pipeline_brace_group() {
+        assert_output(
+            "echo hello | { read i; echo $i; } | { read i; echo $i; } | cat",
+            "hello\n",
+        );
     }
 }
