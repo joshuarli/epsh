@@ -1,6 +1,10 @@
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::ast::*;
 use crate::error::{ExitStatus, ShellError, Span};
@@ -19,6 +23,9 @@ pub struct Shell {
     pub exit_status: ExitStatus,
     /// Shell's PID ($$)
     pub pid: u32,
+    /// Current working directory — per-Shell, not process-global.
+    /// All relative paths (redirections, glob, source) resolve against this.
+    pub cwd: PathBuf,
     /// Number of nested loops (for break/continue counting)
     pub(crate) loop_depth: usize,
     /// Shell options
@@ -31,6 +38,14 @@ pub struct Shell {
     /// True when executing inside a forked child (pipeline stage, command subst).
     /// Subshells skip the extra fork to avoid pipe fd leaks.
     pub(crate) in_forked_child: bool,
+    /// Optional cancellation flag. When set to true, the shell aborts execution.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Optional stdout sink. When set, builtin output goes here instead of fd 1.
+    pub(crate) stdout_sink: Option<Arc<Mutex<dyn Write + Send>>>,
+    /// Optional stderr sink. When set, error output goes here instead of fd 2.
+    pub(crate) stderr_sink: Option<Arc<Mutex<dyn Write + Send>>>,
+    /// PIDs of currently running child processes (for cancellation cleanup).
+    pub(crate) child_pids: Vec<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +56,8 @@ pub struct ShellOpts {
     pub nounset: bool,
     /// -x: print commands before execution (xtrace)
     pub xtrace: bool,
+    /// -o pipefail: return highest nonzero status from any pipeline stage
+    pub pipefail: bool,
 }
 
 impl expand::ShellExpand for Shell {
@@ -48,6 +65,7 @@ impl expand::ShellExpand for Shell {
     fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
     fn exit_status(&self) -> ExitStatus { self.exit_status }
     fn pid(&self) -> u32 { self.pid }
+    fn cwd(&self) -> &Path { &self.cwd }
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
         self.command_subst(cmd)
     }
@@ -66,11 +84,102 @@ impl Shell {
             functions: HashMap::new(),
             exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             loop_depth: 0,
             opts: ShellOpts::default(),
             traps: HashMap::new(),
             tested: false,
             in_forked_child: false,
+            cancel: None,
+            stdout_sink: None,
+            stderr_sink: None,
+            child_pids: Vec::new(),
+        }
+    }
+
+    /// Set a cancellation flag. When the flag is set to true, the shell
+    /// will abort execution at the next check point with `ShellError::Cancelled`.
+    pub fn set_cancel_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.cancel = Some(flag);
+    }
+
+    /// Check if cancellation has been requested.
+    fn check_cancel(&self) -> crate::error::Result<()> {
+        if let Some(ref flag) = self.cancel
+            && flag.load(Ordering::Relaxed)
+        {
+            return Err(ShellError::Cancelled);
+        }
+        Ok(())
+    }
+
+    /// Set a stdout sink. Builtin output will be written here instead of fd 1.
+    pub fn set_stdout_sink(&mut self, sink: Arc<Mutex<dyn Write + Send>>) {
+        self.stdout_sink = Some(sink);
+    }
+
+    /// Set a stderr sink. Error output will be written here instead of fd 2.
+    pub fn set_stderr_sink(&mut self, sink: Arc<Mutex<dyn Write + Send>>) {
+        self.stderr_sink = Some(sink);
+    }
+
+    /// Write to stdout (sink or fd 1).
+    pub(crate) fn write_out(&self, data: &[u8]) {
+        if let Some(ref sink) = self.stdout_sink {
+            if let Ok(mut w) = sink.lock() {
+                let _ = w.write_all(data);
+            }
+        } else {
+            unsafe { sys::write(1, data.as_ptr() as *const _, data.len()); }
+        }
+    }
+
+    /// Write to stderr (sink or fd 2).
+    pub(crate) fn write_err(&self, data: &[u8]) {
+        if let Some(ref sink) = self.stderr_sink {
+            if let Ok(mut w) = sink.lock() {
+                let _ = w.write_all(data);
+            }
+        } else {
+            unsafe { sys::write(2, data.as_ptr() as *const _, data.len()); }
+        }
+    }
+
+    /// Write a formatted error message to stderr.
+    pub(crate) fn err_msg(&self, msg: &str) {
+        self.write_err(msg.as_bytes());
+        if !msg.ends_with('\n') {
+            self.write_err(b"\n");
+        }
+    }
+
+    /// Kill all tracked child processes (process groups).
+    fn kill_children(&mut self) {
+        for &pid in &self.child_pids {
+            // Kill the process group (negative PID)
+            unsafe { libc::kill(-pid, libc::SIGKILL); }
+        }
+        // Reap them
+        for &pid in &self.child_pids {
+            let mut status = 0i32;
+            unsafe { sys::waitpid(pid, &mut status, 0); }
+        }
+        self.child_pids.clear();
+    }
+
+    /// Set the shell's working directory.
+    pub fn set_cwd(&mut self, dir: PathBuf) {
+        self.cwd = dir;
+    }
+
+    /// Resolve a path against the shell's working directory.
+    /// Absolute paths are returned as-is; relative paths are joined with `self.cwd`.
+    pub fn resolve_path(&self, p: &str) -> PathBuf {
+        let path = Path::new(p);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd.join(path)
         }
     }
 
@@ -80,11 +189,18 @@ impl Shell {
         let program = match parser.parse() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("epsh: {e}");
+                self.err_msg(&format!("epsh: {e}"));
                 return 2;
             }
         };
 
+        self.run_program(&program).code()
+    }
+
+    /// Execute a pre-parsed program. Returns the final exit status.
+    /// This is the library-facing entry point — parse once with `Parser`,
+    /// then execute via `run_program`.
+    pub fn run_program(&mut self, program: &crate::ast::Program) -> ExitStatus {
         for cmd in &program.commands {
             match self.eval_command(cmd) {
                 Ok(status) => {
@@ -92,20 +208,23 @@ impl Shell {
                 }
                 Err(ShellError::Exit(n)) => {
                     self.run_exit_trap();
-                    return n.code();
+                    return n;
+                }
+                Err(ShellError::Cancelled) => {
+                    self.kill_children();
+                    return ExitStatus::from_signal(2); // 130 = SIGINT
                 }
                 Err(e) => {
-                    eprintln!("epsh: {e}");
+                    self.err_msg(&format!("epsh: {e}"));
                     self.exit_status = ExitStatus::MISUSE;
-                    // Non-interactive shell: most errors are fatal
                     self.run_exit_trap();
-                    return self.exit_status.code();
+                    return self.exit_status;
                 }
             }
         }
 
         self.run_exit_trap();
-        self.exit_status.code()
+        self.exit_status
     }
 
     /// Run the EXIT trap if one is set.
@@ -166,6 +285,7 @@ impl Shell {
 
     /// Evaluate a command node, returning its exit status.
     pub fn eval_command(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
+        self.check_cancel()?;
         let status = self.eval_command_inner(cmd)?;
         self.exit_status = status;
 
@@ -298,6 +418,7 @@ impl Shell {
                 self.loop_depth += 1;
                 let mut last_status = ExitStatus::SUCCESS;
                 loop {
+                    self.check_cancel()?;
                     let saved = self.tested;
                     self.tested = true;
                     let cond_status = self.eval_command(cond)?;
@@ -332,6 +453,7 @@ impl Shell {
                 self.loop_depth += 1;
                 let mut last_status = ExitStatus::SUCCESS;
                 loop {
+                    self.check_cancel()?;
                     let saved = self.tested;
                     self.tested = true;
                     let cond_status = self.eval_command(cond)?;
@@ -379,6 +501,7 @@ impl Shell {
                 self.loop_depth += 1;
                 let mut last_status = ExitStatus::SUCCESS;
                 for value in &word_list {
+                    self.check_cancel()?;
                     let _ = self.vars.set(var, value);
                     match self.eval_command(body) {
                         Ok(s) => last_status = s,
@@ -534,10 +657,20 @@ impl Shell {
         redirs: &[Redir],
         _span: Span,
     ) -> crate::error::Result<ExitStatus> {
+        self.check_cancel()?;
         let saved = self.setup_redirections(redirs)?;
 
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
+        cmd.current_dir(&self.cwd);
+
+        // Isolate child in its own process group for cancellation cleanup
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
 
         // Set environment: exported vars + temporary assignments
         cmd.env_clear();
@@ -549,21 +682,95 @@ impl Shell {
             cmd.env(&assign.name, &value);
         }
 
-        // Inherit stdio (redirections are already applied to our fds)
-        let result = match cmd.status() {
-            Ok(status) => {
-                let code = status.code().unwrap_or(128);
-                Ok(ExitStatus::from(code))
+        // When sinks are set, capture child stdout/stderr and relay to sinks.
+        // Otherwise, inherit stdio (redirections are already applied to our fds).
+        let has_sinks = self.stdout_sink.is_some() || self.stderr_sink.is_some();
+        if has_sinks {
+            use std::process::Stdio;
+            if self.stdout_sink.is_some() {
+                cmd.stdout(Stdio::piped());
             }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("{}: not found", args[0]);
-                    Ok(ExitStatus::NOT_FOUND)
-                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    eprintln!("{}: permission denied", args[0]);
-                    Ok(ExitStatus::NOT_EXECUTABLE)
-                } else {
-                    Err(ShellError::Io(e))
+            if self.stderr_sink.is_some() {
+                cmd.stderr(Stdio::piped());
+            }
+        }
+
+        let result = if has_sinks {
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(stdout) = child.stdout.take() {
+                        let sink = self.stdout_sink.clone();
+                        std::thread::spawn(move || {
+                            if let Some(sink) = sink {
+                                let mut reader = std::io::BufReader::new(stdout);
+                                let mut buf = [0u8; 4096];
+                                loop {
+                                    match std::io::Read::read(&mut reader, &mut buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            if let Ok(mut w) = sink.lock() {
+                                                let _ = w.write_all(&buf[..n]);
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    if let Some(stderr) = child.stderr.take() {
+                        let sink = self.stderr_sink.clone();
+                        std::thread::spawn(move || {
+                            if let Some(sink) = sink {
+                                let mut reader = std::io::BufReader::new(stderr);
+                                let mut buf = [0u8; 4096];
+                                loop {
+                                    match std::io::Read::read(&mut reader, &mut buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            if let Ok(mut w) = sink.lock() {
+                                                let _ = w.write_all(&buf[..n]);
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    match child.wait() {
+                        Ok(status) => Ok(ExitStatus::from(status.code().unwrap_or(128))),
+                        Err(e) => Err(ShellError::Io(e)),
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        self.err_msg(&format!("{}: not found", args[0]));
+                        Ok(ExitStatus::NOT_FOUND)
+                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        self.err_msg(&format!("{}: permission denied", args[0]));
+                        Ok(ExitStatus::NOT_EXECUTABLE)
+                    } else {
+                        Err(ShellError::Io(e))
+                    }
+                }
+            }
+        } else {
+            match cmd.status() {
+                Ok(status) => {
+                    let code = status.code().unwrap_or(128);
+                    Ok(ExitStatus::from(code))
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        self.err_msg(&format!("{}: not found", args[0]));
+                        Ok(ExitStatus::NOT_FOUND)
+                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        self.err_msg(&format!("{}: permission denied", args[0]));
+                        Ok(ExitStatus::NOT_EXECUTABLE)
+                    } else {
+                        Err(ShellError::Io(e))
+                    }
                 }
             }
         };
@@ -600,7 +807,8 @@ impl Shell {
                 }
 
                 if pid == 0 {
-                    // Child process — mark as forked so subshells don't double-fork
+                    // Child process — isolate in own process group
+                    libc::setpgid(0, 0);
                     self.in_forked_child = true;
                     // Connect stdin from previous pipe
                     if i > 0 {
@@ -626,6 +834,7 @@ impl Shell {
                 }
 
                 children.push(pid);
+                self.child_pids.push(pid);
             }
         }
 
@@ -637,19 +846,30 @@ impl Shell {
             }
         }
 
-        // Wait for all children, return status of the last one
+        // Wait for all children
         let mut last_status = ExitStatus::SUCCESS;
+        let mut pipefail_status = ExitStatus::SUCCESS;
         for (i, &pid) in children.iter().enumerate() {
             let mut status = 0i32;
             unsafe {
                 sys::waitpid(pid, &mut status, 0);
             }
+            self.child_pids.retain(|&p| p != pid);
+            let stage_status = ExitStatus::from_wait(status);
+            if !stage_status.success() {
+                pipefail_status = stage_status;
+            }
             if i == children.len() - 1 {
-                last_status = ExitStatus::from_wait(status);
+                last_status = stage_status;
             }
         }
+        self.check_cancel()?;
 
-        Ok(last_status)
+        if self.opts.pipefail && !pipefail_status.success() {
+            Ok(pipefail_status)
+        } else {
+            Ok(last_status)
+        }
     }
 
     /// Execute a command in a subshell (fork).
@@ -661,7 +881,8 @@ impl Shell {
             }
 
             if pid == 0 {
-                // Child — clear parent's traps, they don't inherit
+                // Child — isolate in own process group
+                libc::setpgid(0, 0);
                 let parent_exit_trap = self.traps.remove("EXIT")
                     .or_else(|| self.traps.remove("exit"));
                 drop(parent_exit_trap); // parent EXIT trap doesn't run in subshell
@@ -682,8 +903,11 @@ impl Shell {
             }
 
             // Parent
+            self.child_pids.push(pid);
             let mut status = 0i32;
             sys::waitpid(pid, &mut status, 0);
+            self.child_pids.retain(|&p| p != pid);
+            self.check_cancel()?;
             Ok(ExitStatus::from_wait(status))
         }
     }
@@ -697,6 +921,7 @@ impl Shell {
             }
 
             if pid == 0 {
+                libc::setpgid(0, 0);
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
                     Err(_) => sys::exit_child(ExitStatus::FAILURE),
@@ -709,6 +934,7 @@ impl Shell {
                 sys::exit_child(status);
             }
 
+            self.child_pids.push(pid);
             // Don't wait — background process
             Ok(ExitStatus::SUCCESS)
         }
@@ -722,7 +948,8 @@ impl Shell {
             && let RedirKind::Input(ref word) = redirs[0].kind
         {
                     let filename = self.expand_string(word)?;
-                    match std::fs::read_to_string(&filename) {
+                    let filepath = self.resolve_path(&filename);
+                    match std::fs::read_to_string(&filepath) {
                         Ok(mut content) => {
                             // Remove trailing newlines (like command substitution)
                             while content.ends_with('\n') {
@@ -732,7 +959,7 @@ impl Shell {
                             return Ok(content);
                         }
                         Err(e) => {
-                            eprintln!("epsh: {filename}: {e}");
+                            self.err_msg(&format!("epsh: {filename}: {e}"));
                             self.exit_status = ExitStatus::FAILURE;
                             return Err(ShellError::Runtime {
                                 msg: format!("{filename}: {e}"),
@@ -757,6 +984,7 @@ impl Shell {
 
             if pid == 0 {
                 // Child: redirect stdout to write end of pipe
+                libc::setpgid(0, 0);
                 self.in_forked_child = true;
                 sys::close(fds[0]);
                 sys::dup2(fds[1], 1);
@@ -773,6 +1001,7 @@ impl Shell {
 
             // Parent: read from read end
             sys::close(fds[1]);
+            self.child_pids.push(pid);
 
             let mut output = String::new();
             let mut read_file = std::fs::File::from_raw_fd(fds[0]);
@@ -780,9 +1009,11 @@ impl Shell {
 
             let mut status = 0i32;
             sys::waitpid(pid, &mut status, 0);
+            self.child_pids.retain(|&p| p != pid);
             if sys::wifexited(status) {
                 self.exit_status = ExitStatus::from(sys::wexitstatus(status));
             }
+            self.check_cancel()?;
 
             // Remove trailing newlines (POSIX requirement)
             while output.ends_with('\n') {

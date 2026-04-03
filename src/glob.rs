@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 /// Expand a glob pattern into matching filenames.
 /// Returns sorted matches, or empty vec if no matches.
-pub fn glob(pattern: &str) -> Vec<String> {
+/// `cwd` is the working directory for resolving relative patterns.
+pub fn glob(pattern: &str, cwd: &Path) -> Vec<String> {
     let mut results = Vec::new();
 
     if pattern.is_empty() {
@@ -28,18 +29,19 @@ pub fn glob(pattern: &str) -> Vec<String> {
     }
 
     // Start matching from the first component
-    let start = if components[0] == "/" {
-        glob_recursive(&PathBuf::from("/"), &components[1..], &mut results);
+    if components[0] == "/" {
+        glob_recursive(&PathBuf::from("/"), &PathBuf::from("/"), &components[1..], &mut results);
         return sort_results(results);
-    } else {
-        PathBuf::from(".")
-    };
+    }
 
-    glob_recursive(&start, &components, &mut results);
+    // Relative pattern: filesystem access uses cwd, but results use relative paths
+    glob_recursive(cwd, &PathBuf::new(), &components, &mut results);
     sort_results(results)
 }
 
-fn glob_recursive(dir: &Path, components: &[&str], results: &mut Vec<String>) {
+/// `fs_dir`: actual filesystem directory to read from
+/// `display_dir`: path prefix for result strings (relative to original pattern)
+fn glob_recursive(fs_dir: &Path, display_dir: &Path, components: &[&str], results: &mut Vec<String>) {
     if components.is_empty() {
         return;
     }
@@ -49,21 +51,20 @@ fn glob_recursive(dir: &Path, components: &[&str], results: &mut Vec<String>) {
 
     // If pattern has no glob chars, just check if path exists
     if !has_glob_chars(pattern) {
-        let candidate = dir.join(pattern);
+        let fs_candidate = fs_dir.join(pattern);
+        let display_candidate = display_dir.join(pattern);
         if remaining.is_empty() {
-            if candidate.exists() {
-                results.push(path_to_string(&candidate));
+            if fs_candidate.exists() {
+                results.push(path_to_string(&display_candidate));
             }
-        } else {
-            if candidate.is_dir() {
-                glob_recursive(&candidate, remaining, results);
-            }
+        } else if fs_candidate.is_dir() {
+            glob_recursive(&fs_candidate, &display_candidate, remaining, results);
         }
         return;
     }
 
     // Read directory and match each entry
-    let entries = match fs::read_dir(dir) {
+    let entries = match fs::read_dir(fs_dir) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -86,11 +87,12 @@ fn glob_recursive(dir: &Path, components: &[&str], results: &mut Vec<String>) {
         }
 
         if fnmatch(pattern, name_str) {
-            let full = dir.join(name_str);
+            let fs_full = fs_dir.join(name_str);
+            let display_full = display_dir.join(name_str);
             if remaining.is_empty() {
-                results.push(path_to_string(&full));
-            } else if full.is_dir() {
-                glob_recursive(&full, remaining, results);
+                results.push(path_to_string(&display_full));
+            } else if fs_full.is_dir() {
+                glob_recursive(&fs_full, &display_full, remaining, results);
             }
         }
     }

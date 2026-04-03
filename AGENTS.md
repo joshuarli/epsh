@@ -2,7 +2,7 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-156/167 (93%) mksh conformance on dash-passable tests. 9.3k lines, 230 tests (136 unit + 94 integration).
+156/167 (93%) mksh conformance on dash-passable tests. 9.6k lines, 230 tests (136 unit + 94 integration).
 
 ## Architecture
 
@@ -13,16 +13,44 @@ src/
   ast.rs          (214) AST types: Command, Word, WordPart, Redir, ParamExpr
   lexer.rs        (1805) Single-pass tokenizer with unified word-part builder
   parser.rs       (1963) Recursive-descent parser, heredoc body reading
-  eval.rs         (1043) Shell struct, eval dispatch, pipelines, subshells, comsub
-  builtins.rs     (1025) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
-  expand.rs       (1088) Word expansion: tilde, param, arith, IFS split, glob, patterns
+  eval.rs         (1274) Shell struct, eval dispatch, pipelines, subshells, comsub
+  builtins.rs     (1027) 25+ builtins: echo, cd, test, read, set, trap, printf, ...
+  expand.rs       (1093) Word expansion: tilde, param, arith, IFS split, glob, patterns
   arith.rs        (809)  $((…)) evaluator with short-circuit (noeval)
   var.rs          (315)  Variable storage with scope stack
-  glob.rs         (289)  Custom fnmatch + pathname expansion
-  redirect.rs     (147)  FD save/restore for redirections
+  glob.rs         (291)  Custom fnmatch + pathname expansion (cwd-aware)
+  redirect.rs     (151)  FD save/restore for redirections
   test_cmd.rs     (398)  POSIX test/[ recursive-descent evaluator
-  error.rs        (120)  ShellError enum, ExitStatus newtype, Result alias
+  error.rs        (138)  ShellError enum, ExitStatus newtype, Result alias
   sys.rs          (33)   Thin libc wrappers
+```
+
+## Embedding API
+
+```rust
+use epsh::eval::Shell;
+use epsh::parser::Parser;
+
+let mut shell = Shell::new();
+
+// Per-shell working directory (thread-safe, no process-global state)
+shell.set_cwd(PathBuf::from("/some/dir"));
+
+// Cancellation via shared flag
+let cancel = Arc::new(AtomicBool::new(false));
+shell.set_cancel_flag(cancel.clone());
+// cancel.store(true, Ordering::Relaxed);  // aborts execution
+
+// Output capture via sinks
+let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
+shell.set_stdout_sink(stdout.clone());
+
+// Parse once, execute separately (for permission checking)
+let program = Parser::new("echo hello").parse().unwrap();
+let status = shell.run_program(&program);
+
+// Or one-shot
+let exit_code = shell.run_script("echo hello");
 ```
 
 ## Design Lineage — What We Actually Took

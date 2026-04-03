@@ -22,16 +22,10 @@ impl Shell {
             "false" => Some(ExitStatus::FAILURE),
             "echo" => Some(self.builtin_echo(args)),
             "cd" => Some(self.builtin_cd(args)),
-            "pwd" => match std::env::current_dir() {
-                Ok(p) => {
-                    write_stdout(&format!("{}\n", p.display()));
-                    Some(ExitStatus::SUCCESS)
-                }
-                Err(e) => {
-                    eprintln!("pwd: {e}");
-                    Some(ExitStatus::FAILURE)
-                }
-            },
+            "pwd" => {
+                self.write_out(format!("{}\n", self.cwd.display()).as_bytes());
+                Some(ExitStatus::SUCCESS)
+            }
             "exit" => {
                 let code = args
                     .get(1)
@@ -52,7 +46,7 @@ impl Shell {
                 if let Some(arg) = args.get(1) {
                     match arg.parse::<usize>() {
                         Ok(0) => {
-                            eprintln!("break: Illegal number: {arg}");
+                            self.err_msg(&format!("break: Illegal number: {arg}"));
                             return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                         Ok(n) => {
@@ -63,7 +57,7 @@ impl Shell {
                             }
                         }
                         Err(_) => {
-                            eprintln!("break: Illegal number: {arg}");
+                            self.err_msg(&format!("break: Illegal number: {arg}"));
                             return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                     }
@@ -77,7 +71,7 @@ impl Shell {
                 if let Some(arg) = args.get(1) {
                     match arg.parse::<usize>() {
                         Ok(0) => {
-                            eprintln!("continue: Illegal number: {arg}");
+                            self.err_msg(&format!("continue: Illegal number: {arg}"));
                             return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                         Ok(n) => {
@@ -88,7 +82,7 @@ impl Shell {
                             }
                         }
                         Err(_) => {
-                            eprintln!("continue: Illegal number: {arg}");
+                            self.err_msg(&format!("continue: Illegal number: {arg}"));
                             return Err(ShellError::Exit(ExitStatus::FAILURE));
                         }
                     }
@@ -150,11 +144,7 @@ impl Shell {
         if newline {
             text.push('\n');
         }
-        // Write directly to fd 1 to bypass Rust's stdout buffering.
-        // This is necessary for command substitution where fd 1 is a pipe.
-        unsafe {
-            sys::write(1, text.as_ptr() as *const _, text.len());
-        }
+        self.write_out(text.as_bytes());
         ExitStatus::SUCCESS
     }
 
@@ -165,21 +155,26 @@ impl Shell {
             match self.vars.get("HOME") {
                 Some(h) => h,
                 None => {
-                    eprintln!("cd: HOME not set");
+                    self.err_msg("cd: HOME not set");
                     return ExitStatus::FAILURE;
                 }
             }
         };
 
-        match std::env::set_current_dir(dir) {
-            Ok(()) => {
-                if let Ok(pwd) = std::env::current_dir() {
-                    let _ = self.vars.set("PWD", &pwd.to_string_lossy());
+        let target = self.resolve_path(dir);
+        match target.canonicalize() {
+            Ok(canonical) => {
+                if canonical.is_dir() {
+                    self.cwd = canonical;
+                    let _ = self.vars.set("PWD", &self.cwd.to_string_lossy());
+                    ExitStatus::SUCCESS
+                } else {
+                    self.err_msg(&format!("cd: {dir}: Not a directory"));
+                    ExitStatus::FAILURE
                 }
-                ExitStatus::SUCCESS
             }
             Err(e) => {
-                eprintln!("cd: {dir}: {e}");
+                self.err_msg(&format!("cd: {dir}: {e}"));
                 ExitStatus::FAILURE
             }
         }
@@ -189,7 +184,7 @@ impl Shell {
         if args.len() <= 1 {
             // Print all exported variables
             for (k, v) in self.vars.exported_env() {
-                write_stdout(&format!("export {k}=\"{v}\"\n"));
+                self.write_out(format!("export {k}=\"{v}\"\n").as_bytes());
             }
             return ExitStatus::SUCCESS;
         }
@@ -242,7 +237,7 @@ impl Shell {
             if unset_funcs {
                 self.functions.remove(arg.as_str());
             } else if let Err(e) = self.vars.unset(arg) {
-                eprintln!("unset: {e}");
+                self.err_msg(&format!("unset: {e}"));
                 status = ExitStatus::FAILURE;
             }
         }
@@ -262,6 +257,20 @@ impl Shell {
                 // Remaining args become positional parameters
                 self.vars.positional = args[i..].to_vec();
                 return ExitStatus::SUCCESS;
+            } else if (arg == "-o" || arg == "+o") && i + 1 < args.len() {
+                let enable = arg == "-o";
+                i += 1;
+                match args[i].as_str() {
+                    "pipefail" => self.opts.pipefail = enable,
+                    "errexit" => self.opts.errexit = enable,
+                    "nounset" => self.opts.nounset = enable,
+                    "xtrace" => self.opts.xtrace = enable,
+                    other => {
+                        self.err_msg(&format!("set: unknown option: {other}"));
+                        return ExitStatus::FAILURE;
+                    }
+                }
+                i += 1;
             } else if arg.starts_with('-') || arg.starts_with('+') {
                 let enable = arg.starts_with('-');
                 for ch in arg[1..].chars() {
@@ -270,7 +279,7 @@ impl Shell {
                         'u' => self.opts.nounset = enable,
                         'x' => self.opts.xtrace = enable,
                         _ => {
-                            eprintln!("set: unknown option: -{ch}");
+                            self.err_msg(&format!("set: unknown option: -{ch}"));
                             return ExitStatus::FAILURE;
                         }
                     }
@@ -291,7 +300,7 @@ impl Shell {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
         if n > self.vars.positional.len() {
-            eprintln!("shift: can't shift that many");
+            self.err_msg("shift: can't shift that many");
             return ExitStatus::FAILURE;
         }
         self.vars.positional = self.vars.positional[n..].to_vec();
@@ -309,7 +318,7 @@ impl Shell {
         let program = match parser.parse() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("epsh: {e}");
+                self.err_msg(&format!("epsh: {e}"));
                 return Ok(ExitStatus::MISUSE);
             }
         };
@@ -328,14 +337,15 @@ impl Shell {
 
     fn builtin_dot(&mut self, args: &[String], _span: Span) -> crate::error::Result<ExitStatus> {
         if args.len() <= 1 {
-            eprintln!(".: filename argument required");
+            self.err_msg(".: filename argument required");
             return Err(ShellError::Exit(ExitStatus::MISUSE));
         }
         let filename = &args[1];
-        let content = match std::fs::read_to_string(filename) {
+        let filepath = self.resolve_path(filename);
+        let content = match std::fs::read_to_string(&filepath) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(".: {filename}: {e}");
+                self.err_msg(&format!(".: {filename}: {e}"));
                 // . is a special builtin — file not found is fatal
                 return Err(ShellError::Exit(ExitStatus::NOT_FOUND));
             }
@@ -346,7 +356,7 @@ impl Shell {
         let program = match parser.parse() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("epsh: {e}");
+                self.err_msg(&format!("epsh: {e}"));
                 return Ok(ExitStatus::MISUSE);
             }
         };
@@ -362,7 +372,7 @@ impl Shell {
         let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let args = if args[0] == "[" {
             if args.last() != Some(&"]") {
-                eprintln!("[: missing ]");
+                self.err_msg("[: missing ]");
                 return ExitStatus::MISUSE;
             }
             &args[1..args.len() - 1]
@@ -533,7 +543,7 @@ impl Shell {
 
         // exec with command — replace process
         let err = exec::execvp(&args[0], args);
-        eprintln!("exec: {}: {err}", args[0]);
+        self.err_msg(&format!("exec: {}: {err}", args[0]));
         Ok(ExitStatus::NOT_EXECUTABLE)
     }
 
@@ -563,13 +573,13 @@ impl Shell {
         let mut status = ExitStatus::SUCCESS;
         for name in &args[1..] {
             if self.functions.contains_key(name.as_str()) {
-                write_stdout(&format!("{name} is a function\n"));
+                self.write_out(format!("{name} is a function\n").as_bytes());
             } else if is_builtin(name) {
-                write_stdout(&format!("{name} is a shell builtin\n"));
+                self.write_out(format!("{name} is a shell builtin\n").as_bytes());
             } else if let Ok(path) = which(name) {
-                write_stdout(&format!("{name} is {path}\n"));
+                self.write_out(format!("{name} is {path}\n").as_bytes());
             } else {
-                eprintln!("{name}: not found");
+                self.err_msg(&format!("{name}: not found"));
                 status = ExitStatus::FAILURE;
             }
         }
@@ -592,7 +602,7 @@ impl Shell {
         if args.len() <= 1 {
             // Print current traps
             for (sig, action) in &self.traps {
-                write_stdout(&format!("trap -- '{}' {}\n", action, sig));
+                self.write_out(format!("trap -- '{}' {}\n", action, sig).as_bytes());
             }
             return ExitStatus::SUCCESS;
         }
@@ -626,7 +636,7 @@ impl Shell {
             unsafe {
                 sys::umask(mask);
             }
-            write_stdout(&format!("{mask:04o}\n"));
+            self.write_out(format!("{mask:04o}\n").as_bytes());
             return ExitStatus::SUCCESS;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
@@ -635,14 +645,14 @@ impl Shell {
             }
             ExitStatus::SUCCESS
         } else {
-            eprintln!("umask: {}: invalid mask", args[1]);
+            self.err_msg(&format!("umask: {}: invalid mask", args[1]));
             ExitStatus::FAILURE
         }
     }
 
     fn builtin_getopts(&mut self, args: &[String]) -> ExitStatus {
         if args.len() < 3 {
-            eprintln!("getopts: usage: getopts optstring name [arg ...]");
+            self.err_msg("getopts: usage: getopts optstring name [arg ...]");
             return ExitStatus::MISUSE;
         }
         let optstring = &args[1];
@@ -709,7 +719,7 @@ impl Shell {
                         let _ = self.vars.set("OPTIND", &(optind + 2).to_string());
                         let _ = self.vars.set("_OPTPOS", "1");
                     } else {
-                        eprintln!("getopts: option requires argument -- {opt}");
+                        self.err_msg(&format!("getopts: option requires argument -- {opt}"));
                         let _ = self.vars.set(name, "?");
                         let _ = self.vars.set("OPTIND", &(optind + 1).to_string());
                         return ExitStatus::SUCCESS;
@@ -730,7 +740,7 @@ impl Shell {
                 if silent {
                     let _ = self.vars.set("OPTARG", &opt.to_string());
                 } else {
-                    eprintln!("getopts: illegal option -- {opt}");
+                    self.err_msg(&format!("getopts: illegal option -- {opt}"));
                 }
                 let _ = self.vars.set(name, "?");
                 if optpos + 1 >= arg_chars.len() {
@@ -746,7 +756,7 @@ impl Shell {
 
     fn builtin_printf(&self, args: &[String]) -> ExitStatus {
         if args.len() < 2 {
-            eprintln!("printf: usage: printf format [arguments]");
+            self.err_msg("printf: usage: printf format [arguments]");
             return ExitStatus::FAILURE;
         }
 
@@ -909,7 +919,7 @@ impl Shell {
             }
         }
 
-        write_stdout(&out);
+        self.write_out(out.as_bytes());
         ExitStatus::SUCCESS
     }
 }
@@ -958,14 +968,6 @@ fn which(name: &str) -> Result<String, ()> {
         }
     }
     Err(())
-}
-
-/// Write a string directly to fd 1, bypassing Rust's stdout buffering.
-/// Necessary for correct behavior in command substitution (fd 1 may be a pipe).
-fn write_stdout(s: &str) {
-    unsafe {
-        sys::write(1, s.as_ptr() as *const _, s.len());
-    }
 }
 
 fn unescape_echo(s: &str) -> String {

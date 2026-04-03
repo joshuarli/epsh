@@ -38,8 +38,9 @@ impl Shell {
             match &redir.kind {
                 RedirKind::Input(word) => {
                     let filename = self.expand_string(word)?;
-                    let file = std::fs::File::open(&filename).map_err(|e| {
-                        eprintln!("{filename}: {e}");
+                    let filepath = self.resolve_path(&filename);
+                    let file = std::fs::File::open(&filepath).map_err(|e| {
+                        self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
                     })?;
                     unsafe {
@@ -48,8 +49,9 @@ impl Shell {
                 }
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
                     let filename = self.expand_string(word)?;
-                    let file = std::fs::File::create(&filename).map_err(|e| {
-                        eprintln!("{filename}: {e}");
+                    let filepath = self.resolve_path(&filename);
+                    let file = std::fs::File::create(&filepath).map_err(|e| {
+                        self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
                     })?;
                     unsafe {
@@ -58,13 +60,14 @@ impl Shell {
                 }
                 RedirKind::Append(word) => {
                     let filename = self.expand_string(word)?;
+                    let filepath = self.resolve_path(&filename);
                     let file = std::fs::OpenOptions::new()
                         .create(true)
                         .truncate(false)
                         .append(true)
-                        .open(&filename)
+                        .open(&filepath)
                         .map_err(|e| {
-                            eprintln!("{filename}: {e}");
+                            self.err_msg(&format!("{filename}: {e}"));
                             ShellError::Io(e)
                         })?;
                     unsafe {
@@ -73,14 +76,15 @@ impl Shell {
                 }
                 RedirKind::ReadWrite(word) => {
                     let filename = self.expand_string(word)?;
+                    let filepath = self.resolve_path(&filename);
                     let file = std::fs::OpenOptions::new()
                         .read(true)
                         .write(true)
                         .create(true)
                         .truncate(false)
-                        .open(&filename)
+                        .open(&filepath)
                         .map_err(|e| {
-                            eprintln!("{filename}: {e}");
+                            self.err_msg(&format!("{filename}: {e}"));
                             ShellError::Io(e)
                         })?;
                     unsafe {

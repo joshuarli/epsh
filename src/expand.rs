@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::arith;
 use crate::ast::*;
 use crate::error::{ExitStatus, ShellError};
@@ -12,6 +14,7 @@ pub trait ShellExpand {
     fn vars_mut(&mut self) -> &mut Variables;
     fn exit_status(&self) -> ExitStatus;
     fn pid(&self) -> u32;
+    fn cwd(&self) -> &Path;
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String>;
 }
 
@@ -42,9 +45,10 @@ pub fn expand_word_to_fields(
 
     // Step 3: Pathname expansion (globbing) on results
     let mut result = Vec::new();
+    let cwd = sh.cwd();
     for field in split {
         if glob::has_glob_chars(&field) {
-            let matches = glob::glob(&field);
+            let matches = glob::glob(&field, cwd);
             if matches.is_empty() {
                 // No matches: keep the pattern literal, with quote removal
                 result.push(remove_glob_escapes(&field));
@@ -776,6 +780,7 @@ mod tests {
         fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
         fn exit_status(&self) -> ExitStatus { self.status }
         fn pid(&self) -> u32 { 1 }
+        fn cwd(&self) -> &Path { Path::new("/") }
         fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {
             Ok(String::new())
         }

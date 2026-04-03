@@ -37,6 +37,8 @@ pub enum ShellError {
     Io(std::io::Error),
     /// Generic runtime error with position
     Runtime { msg: String, span: Span },
+    /// Execution was cancelled via the cancel flag
+    Cancelled,
 }
 
 impl fmt::Display for ShellError {
@@ -50,6 +52,7 @@ impl fmt::Display for ShellError {
             ShellError::CommandNotFound(name) => write!(f, "{name}: not found"),
             ShellError::Io(e) => write!(f, "{e}"),
             ShellError::Runtime { msg, span } => write!(f, "{span}: {msg}"),
+            ShellError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
