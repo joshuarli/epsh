@@ -1,10 +1,11 @@
 # epsh
 
-Embeddable POSIX shell for Rust. Built for coding agents.
+Embeddable POSIX shell.
 
-epsh is a non-interactive shell that runs scripts and commands. It exists so
-that Rust-based coding agents can execute shell commands in-process rather
+It primarily exists so that Rust-based coding agents can execute shell commands in-process rather
 than shelling out to bash. It's a library first, binary second.
+
+It's not an interactive shell, but an interactive shell could be built on top of it.
 
 ## Why not just use bash?
 
@@ -28,9 +29,9 @@ This eliminates entire categories of bugs and reduces the surface to what
 a coding agent actually needs: run a script, get the output, check the
 exit code.
 
-## What you get
+## At a glance
 
-- **96% POSIX conformance** on the mksh test suite (161/167 dash-passable tests)
+- **dash conformance** on the mksh test suite (161/167 dash-passable tests)
 - **Builder API** — configure shell options, sinks, timeouts, cancellation in one chain
 - **Per-shell working directory** — no process-global state, safe for concurrent use
 - **Cancellation + timeout** — kills child process groups within milliseconds
@@ -39,9 +40,7 @@ exit code.
 - **Process group isolation** — every child gets `setpgid`; cancellation kills the tree
 - **Fork-free command substitution** — `$(echo ...)` runs in-process, 3.6x faster than dash
 - **External command handler** — plug in your own process spawner for sandboxing or job control
-- **Interactive shell primitives** — `tcsetpgrp`, `WUNTRACED`, `Stopped` for building shells on top
-- **10k lines of Rust + libc** — no other dependencies
-- 314 tests, zero clippy warnings
+- **Interactive shell primitives** — `tcsetpgrp`, `WUNTRACED`, `Stopped` for building interactive shells on top
 
 ## Usage
 
@@ -183,6 +182,3 @@ cargo build && perl check.pl \
   -s check-epsh.t              # 161/167 mksh conformance
 ```
 
-## License
-
-MIT
