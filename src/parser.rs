@@ -376,7 +376,8 @@ impl Parser {
 
                     // IO_NUMBER: digit-only unquoted word before redirect operator
                     if !had_q
-                        && text.len() <= 2
+                        && !text.is_empty()
+                        && text.len() <= 9
                         && text.chars().all(|c| c.is_ascii_digit())
                     {
                         // Peek at what follows — if it's a redirect, use as fd number
@@ -959,7 +960,7 @@ impl Parser {
             } else if let Token::Word(parts, false) = &tok {
                 // IO_NUMBER: digit word before redirect
                 let text = parts_to_text(parts);
-                if text.len() <= 2 && text.chars().all(|c| c.is_ascii_digit()) {
+                if !text.is_empty() && text.len() <= 9 && text.chars().all(|c| c.is_ascii_digit()) {
                     // Check if next-next token is a redirect
                     self.next()?; // consume digit
                     let (next, next_span) = self.peek()?;
