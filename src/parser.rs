@@ -982,13 +982,20 @@ pub fn parse_word_parts(raw: &str) -> Vec<WordPart> {
     parse_word_parts_ctx(raw, false)
 }
 
-/// Parse word parts in double-quote context (single quotes are literal).
-/// Used for unquoted heredoc body expansion.
+/// Parse word parts in heredoc context: single quotes are literal,
+/// and only \$, \`, \\, \<newline> are special backslash escapes
+/// (NOT \" — unlike regular double quotes).
 pub fn parse_word_parts_heredoc(raw: &str) -> Vec<WordPart> {
-    parse_word_parts_ctx(raw, true)
+    parse_word_parts_impl(raw, true, true)
 }
 
+
+
 fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
+    parse_word_parts_impl(raw, in_dquote, false)
+}
+
+fn parse_word_parts_impl(raw: &str, in_dquote: bool, is_heredoc: bool) -> Vec<WordPart> {
     let mut parts = Vec::new();
     let chars: Vec<char> = raw.chars().collect();
     let mut i = 0;
@@ -1008,7 +1015,7 @@ fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
                     i += 1; // skip closing '
                 }
             }
-            '"' => {
+            '"' if !is_heredoc => {
                 // Double-quoted string — parse inner parts
                 i += 1; // skip opening "
                 let inner = parse_double_quoted_parts(&chars, &mut i);
@@ -1046,10 +1053,14 @@ fn parse_word_parts_ctx(raw: &str, in_dquote: bool) -> Vec<WordPart> {
                 i += 1;
                 if i < chars.len() {
                     if chars[i] == '\n' {
-                        // \<newline> in heredoc body = line continuation (skip both)
+                        // \<newline> = line continuation
                         i += 1;
-                    } else if matches!(chars[i], '$' | '`' | '"' | '\\') {
-                        // In double-quote-like context, these are special escapes
+                    } else if is_heredoc && matches!(chars[i], '$' | '`' | '\\') {
+                        // Heredoc: only \$, \`, \\ are special (NOT \")
+                        parts.push(WordPart::Literal(chars[i].to_string()));
+                        i += 1;
+                    } else if !is_heredoc && matches!(chars[i], '$' | '`' | '"' | '\\') {
+                        // Double-quote context: \$, \`, \", \\ are special
                         parts.push(WordPart::Literal(chars[i].to_string()));
                         i += 1;
                     } else {
