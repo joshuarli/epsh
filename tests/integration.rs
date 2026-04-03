@@ -1,8 +1,24 @@
 use std::process::Command;
+use std::path::Path;
 
 fn epsh() -> Command {
     let bin = env!("CARGO_BIN_EXE_epsh");
     Command::new(bin)
+}
+
+/// Run a script in a specific working directory.
+fn run_in(dir: &Path, script: &str) -> (String, String, i32) {
+    let out = epsh()
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .expect("failed to execute epsh");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(128),
+    )
 }
 
 /// Run a script via `epsh -c` and return (stdout, stderr, exit_code).
@@ -656,5 +672,99 @@ mod oils_posix {
             "cat <<EOF1; echo two; cat <<EOF2\none\nEOF1\nthree\nEOF2",
             "one\ntwo\nthree\n",
         );
+    }
+}
+
+mod xtrace {
+    use super::*;
+
+    #[test]
+    fn basic_trace() {
+        let (stdout, stderr, _) = run("set -x; echo hello");
+        assert_eq!(stdout, "hello\n");
+        assert!(stderr.contains("+ echo hello"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn trace_assignment() {
+        let (_, stderr, _) = run("set -x; x=hello");
+        assert!(stderr.contains("x=hello"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn trace_with_expansion() {
+        let (stdout, stderr, _) = run("set -x; x=world; echo hello $x");
+        assert_eq!(stdout, "hello world\n");
+        assert!(stderr.contains("+ echo hello world"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn custom_ps4() {
+        let (_, stderr, _) = run("PS4='>> '; set -x; echo hi");
+        assert!(stderr.contains(">> echo hi"), "stderr: {stderr}");
+    }
+}
+
+mod glob_files {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs as unix_fs;
+
+    /// glob-bad-2: Check that symbolic links aren't stat()'d
+    #[test]
+    fn glob_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("dir");
+        fs::create_dir(&sub).unwrap();
+        unix_fs::symlink("non-existent-file", sub.join("abc")).unwrap();
+
+        let (stdout, _, code) = run_in(dir.path(), "echo d*/*\necho d*/abc");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "dir/abc\ndir/abc\n");
+    }
+
+    /// glob-range-6: glob vs test bracket expression
+    #[test]
+    fn glob_star_b_star() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("abc"), "").unwrap();
+        fs::write(dir.path().join("cbc"), "").unwrap();
+
+        let (stdout, _, code) = run_in(dir.path(), "echo *b*");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "abc cbc\n");
+    }
+
+    /// glob-range-1 subset: ranges and special chars in brackets
+    #[test]
+    fn glob_bracket_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["-bc", "abc", "bbc", "cbc", "!bc", "^bc", "+bc", ",bc", "0bc", "1bc"] {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+
+        // [ab-]* — dash at end is literal
+        let (stdout, _, _) = run_in(dir.path(), "echo [ab-]*");
+        assert_eq!(stdout, "-bc abc bbc\n");
+
+        // [-ab]* — dash at start is literal
+        let (stdout, _, _) = run_in(dir.path(), "echo [-ab]*");
+        assert_eq!(stdout, "-bc abc bbc\n");
+
+        // [!ab]* — negated
+        let (stdout, _, _) = run_in(dir.path(), "echo [!ab]*");
+        assert_eq!(stdout, "!bc +bc ,bc -bc 0bc 1bc ^bc cbc\n");
+
+        // [^ab]* — ^ is NOT negation in POSIX, it's literal
+        let (stdout, _, _) = run_in(dir.path(), "echo [^ab]*");
+        assert_eq!(stdout, "^bc abc bbc\n");
+
+        // [+--]* — range from + to - (ASCII 43-45)
+        let (stdout, _, _) = run_in(dir.path(), "echo [+--]*");
+        assert_eq!(stdout, "+bc ,bc -bc\n");
+
+        // [--1]* — range from - to 1 (ASCII 45-49)
+        let (stdout, _, _) = run_in(dir.path(), "echo [--1]*");
+        assert_eq!(stdout, "-bc 0bc 1bc\n");
     }
 }

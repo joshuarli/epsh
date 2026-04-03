@@ -525,6 +525,7 @@ impl Lexer {
                                 {
                                     // Preserve \ for glob chars so fnmatch can
                                     // distinguish \? (literal) from ? (glob).
+                                    // Quote removal strips these during normal expansion.
                                     literal.push('\\');
                                     literal.push(escaped);
                                 } else {

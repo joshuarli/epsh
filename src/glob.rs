@@ -50,11 +50,12 @@ fn glob_recursive(fs_dir: &Path, display_dir: &Path, components: &[&str], result
     let remaining = &components[1..];
 
     // If pattern has no glob chars, just check if path exists
+    // Use symlink_metadata to include dangling symlinks (not stat which follows them)
     if !has_glob_chars(pattern) {
         let fs_candidate = fs_dir.join(pattern);
         let display_candidate = display_dir.join(pattern);
         if remaining.is_empty() {
-            if fs_candidate.exists() {
+            if fs_candidate.symlink_metadata().is_ok() {
                 results.push(path_to_string(&display_candidate));
             }
         } else if fs_candidate.is_dir() {
@@ -153,22 +154,46 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                     return false;
                 }
                 pi += 1;
-                let negate = pi < pat.len() && (pat[pi] == '!' || pat[pi] == '^');
+                // Only '!' is POSIX negation (not '^')
+                let negate = pi < pat.len() && pat[pi] == '!';
                 if negate {
                     pi += 1;
                 }
 
                 let mut matched = false;
-                let mut first = true;
-                while pi < pat.len() && (first || pat[pi] != ']') {
-                    first = false;
-                    let c1 = pat[pi];
-                    pi += 1;
+                let bracket_start = pi;
+                while pi < pat.len() {
+                    // ] is literal if it's the first char after [ or [!
+                    if pat[pi] == ']' && pi != bracket_start {
+                        break;
+                    }
 
-                    // Range: a-z
+                    // Backslash escapes inside brackets
+                    let c1 = if pat[pi] == '\\' && pi + 1 < pat.len() {
+                        pi += 1;
+                        let c = pat[pi];
+                        pi += 1;
+                        c
+                    } else {
+                        let c = pat[pi];
+                        pi += 1;
+                        c
+                    };
+
+                    // Range: c1-c2 (but not if - is at end before ])
                     if pi + 1 < pat.len() && pat[pi] == '-' && pat[pi + 1] != ']' {
-                        let c2 = pat[pi + 1];
-                        pi += 2;
+                        pi += 1; // skip -
+                        // Handle backslash escape in range end
+                        let c2 = if pat[pi] == '\\' && pi + 1 < pat.len() {
+                            pi += 1;
+                            let c = pat[pi];
+                            pi += 1;
+                            c
+                        } else {
+                            let c = pat[pi];
+                            pi += 1;
+                            c
+                        };
                         if s[si] >= c1 && s[si] <= c2 {
                             matched = true;
                         }

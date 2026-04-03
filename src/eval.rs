@@ -199,6 +199,11 @@ impl Shell {
         self.child_pids.clear();
     }
 
+    /// Build the xtrace prefix string ($PS4, default "+ ").
+    fn xtrace_prefix(&self) -> String {
+        self.vars.get("PS4").unwrap_or("+ ").to_string()
+    }
+
     /// Set the shell's working directory.
     pub fn set_cwd(&mut self, dir: PathBuf) {
         self.cwd = dir;
@@ -613,6 +618,19 @@ impl Shell {
         // Return current exit_status (may have been set by command substitutions
         // during argument expansion — e.g., `$(false)` with empty result).
         if expanded_args.is_empty() {
+            // xtrace for bare assignments
+            if self.opts.xtrace && !assigns.is_empty() {
+                let mut trace = self.xtrace_prefix();
+                for assign in assigns {
+                    let value = self.expand_string(&assign.value)?;
+                    if !trace.ends_with(' ') { trace.push(' '); }
+                    trace.push_str(&assign.name);
+                    trace.push('=');
+                    trace.push_str(&value);
+                }
+                trace.push('\n');
+                self.write_err(trace.as_bytes());
+            }
             for assign in assigns {
                 let value = self.expand_string(&assign.value)?;
                 self.vars
@@ -620,6 +638,25 @@ impl Shell {
                     .map_err(|msg| ShellError::Runtime { msg, span })?;
             }
             return Ok(self.exit_status);
+        }
+
+        // xtrace: print $PS4, assignments, then args (like dash's evalcommand)
+        if self.opts.xtrace {
+            let mut trace = self.xtrace_prefix();
+            for assign in assigns {
+                if let Ok(value) = self.expand_string(&assign.value) {
+                    if !trace.ends_with(' ') { trace.push(' '); }
+                    trace.push_str(&assign.name);
+                    trace.push('=');
+                    trace.push_str(&value);
+                }
+            }
+            for arg in &expanded_args {
+                if !trace.ends_with(' ') { trace.push(' '); }
+                trace.push_str(arg);
+            }
+            trace.push('\n');
+            self.write_err(trace.as_bytes());
         }
 
         let cmd_name = &expanded_args[0];
