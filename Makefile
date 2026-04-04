@@ -1,7 +1,7 @@
 .PHONY: test conformance bench
 
 test:
-	cargo test --test-threads=4
+	cargo test -- --test-threads=4
 	cargo build
 	perl check.pl -p ./target/debug/epsh -s check-epsh.t
 
