@@ -29,6 +29,21 @@ fn main() {
             } else if args[i] == "-s" {
                 // Read from stdin
                 break;
+            } else if (args[i] == "-o" || args[i] == "+o") && i + 1 < args.len() {
+                // Long options: -o pipefail, +o pipefail, etc.
+                let enable = args[i] == "-o";
+                i += 1;
+                match args[i].as_str() {
+                    "pipefail" => shell.opts_mut().pipefail = enable,
+                    "errexit" => shell.opts_mut().errexit = enable,
+                    "nounset" => shell.opts_mut().nounset = enable,
+                    "xtrace" => shell.opts_mut().xtrace = enable,
+                    opt => {
+                        eprintln!("epsh: unknown option: {opt}");
+                        std::process::exit(2);
+                    }
+                }
+                i += 1;
             } else if args[i].starts_with('-') && args[i].len() > 1 {
                 // Shell options like -e, -x, etc.
                 for ch in args[i][1..].chars() {
@@ -64,14 +79,19 @@ fn main() {
     if unsafe { libc::isatty(0) } != 0 {
         eprintln!("epsh — embeddable POSIX shell");
         eprintln!();
-        eprintln!("usage: epsh [-e] [-u] [-x] [-c command] [script [args...]]");
+        eprintln!("usage: epsh [-e] [-u] [-x] [-o option] [-c command] [script [args...]]");
         eprintln!();
-        eprintln!("  -c command   execute command string");
-        eprintln!("  -e           exit on error (set -e)");
-        eprintln!("  -u           error on unset variables (set -u)");
-        eprintln!("  -x           print commands before execution (set -x)");
-        eprintln!("  script       execute script file");
-        eprintln!("  (no args)    read script from stdin (pipe)");
+        eprintln!("  -c command       execute command string");
+        eprintln!("  -e               exit on error (set -e)");
+        eprintln!("  -u               error on unset variables (set -u)");
+        eprintln!("  -x               print commands before execution (set -x)");
+        eprintln!("  -o pipefail      exit status is highest nonzero pipeline stage");
+        eprintln!("  -o errexit       same as -e");
+        eprintln!("  -o nounset       same as -u");
+        eprintln!("  -o xtrace        same as -x");
+        eprintln!("  +o <option>      disable option");
+        eprintln!("  script           execute script file");
+        eprintln!("  (no args)        read script from stdin (pipe)");
         std::process::exit(0);
     }
 
