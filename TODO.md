@@ -2,24 +2,15 @@
 
 ## Current Status
 
-- **161/167 mksh conformance tests passing (96%)**
-- 314 tests (141 unit + 16 API stability + 31 embedding + 122 integration + 4 encoding)
+- **167/167 mksh conformance tests passing (100%)**
+- 376 tests (141 unit + 16 API stability + 31 embedding + 184 integration + 4 encoding)
 - Zero clippy warnings
 - 10k lines of Rust across 16 modules
 
-## Remaining 6 Failures
+## Remaining 1 Failure
 
 ### Test runner limitation (1)
-- `regression-31` — uses `script:` tag (writes script to file, not stdin)
-
-### Edge-case IFS / expansion semantics (4)
-- `IFS-subst-10` — `${var=$*}` with IFS="" should join in scalar context
-- `IFS-subst-6` — `${x#$*}` with IFS="" trim: `$*` should concatenate
-- `xxx-variable-syntax-4` — `${*:+ }` with various IFS values
-- `varexpand-null-3` — `""$@` empty-string argument counting
-
-### Requires missing features (1)
-- `regression-35` — heredoc in nested function definition (heredoc body lifecycle)
+- `regression-31` — uses `script:` tag (writes script to file, not stdin); passes when run manually
 
 ## Performance vs dash
 
