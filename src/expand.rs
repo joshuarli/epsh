@@ -187,12 +187,14 @@ fn expand_word_parts_inner(
                 let has_at = inner.iter().any(|p| matches!(p, WordPart::Param(pe) if pe.name == "@" && matches!(pe.op, ParamOp::Normal)));
 
                 if has_at && inner.len() == 1 {
-                    // Simple case: "$@" alone — expand to separate fields
-                    for arg in sh.vars().positional.iter() {
+                    // "$@" — expand to separate fields
+                    // First element merges with any preceding content in this word
+                    let positional = sh.vars().positional.clone();
+                    for (i, arg) in positional.iter().enumerate() {
                         result.push(ExpandedWord {
                             value: arg.clone(),
                             split_fields: false,
-                            word_break: true,
+                            word_break: i > 0,
                         });
                     }
                 } else if has_at {
@@ -264,11 +266,11 @@ fn expand_word_parts_inner(
                 // $@ unquoted: expand to separate fields
                 if param.name == "@" && matches!(param.op, ParamOp::Normal) && !quoted_context {
                     let positional = sh.vars().positional.clone();
-                    for arg in &positional {
+                    for (i, arg) in positional.iter().enumerate() {
                         result.push(ExpandedWord {
                             value: arg.clone(),
                             split_fields: false,
-                            word_break: true, // each arg is a separate field
+                            word_break: i > 0,
                         });
                     }
                 }

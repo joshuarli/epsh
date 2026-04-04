@@ -1400,3 +1400,52 @@ mod ifs_star_expansion {
         );
     }
 }
+
+mod at_expansion {
+    use super::*;
+
+    #[test]
+    fn quoted_at_merges_prefix() {
+        // """$@" — empty prefix merges with first $@ element
+        assert_output(
+            "n() { echo $#; }; set -- a b; n \"\"\"$@\"",
+            "2\n",
+        );
+    }
+
+    #[test]
+    fn quoted_at_merges_suffix() {
+        // "$@""" — empty suffix merges with last $@ element
+        assert_output(
+            "n() { echo $#; }; set -- a b; n \"$@\"\"\"",
+            "2\n",
+        );
+    }
+
+    #[test]
+    fn var_prefix_at() {
+        // "$e""$@" — empty var prefix merges with first $@ element
+        assert_output(
+            "n() { echo $#; }; unset e; set -- a b; n \"$e\"\"$@\"",
+            "2\n",
+        );
+    }
+
+    #[test]
+    fn empty_at_produces_nothing() {
+        // "$@" with no positionals produces zero fields
+        assert_output(
+            "n() { echo $#; }; set --; n \"$@\"",
+            "0\n",
+        );
+    }
+
+    #[test]
+    fn empty_at_with_prefix_produces_one() {
+        // """$@" with no positionals — prefix "" exists, $@ empty → 1 field
+        assert_output(
+            "n() { echo $#; }; set --; n \"\"\"$@\"",
+            "1\n",
+        );
+    }
+}
