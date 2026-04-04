@@ -358,7 +358,11 @@ fn expand_param_to_fragments(
 ) -> crate::error::Result<Vec<ExpandedWord>> {
     let name = &param.name;
 
-    let raw_value = if is_special_param(name) {
+    // $* and $@ join with first char of IFS when used as a scalar
+    let raw_value = if name == "*" || name == "@" {
+        let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+        Some(sh.vars().positional.join(&sep))
+    } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
         let flags = sh.shell_flags();
@@ -427,6 +431,12 @@ fn expand_param_to_fragments(
                 if matches!(param.op, ParamOp::Assign { .. }) {
                     let val: String = frags.iter().map(|f| f.value.clone()).collect();
                     let _ = sh.vars_mut().set(name, &val);
+                    // Return the assigned value as a single fragment for further splitting
+                    return Ok(vec![ExpandedWord {
+                        value: val,
+                        split_fields: !quoted_context,
+                        word_break: false,
+                    }]);
                 }
                 Ok(frags)
             } else {
@@ -502,7 +512,11 @@ fn expand_param(
     let name = &param.name;
 
     // Get the raw value
-    let raw_value = if is_special_param(name) {
+    // $* joins with first char of IFS (or nothing if IFS="")
+    let raw_value = if name == "*" || name == "@" {
+        let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+        Some(sh.vars().positional.join(&sep))
+    } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
         let flags = sh.shell_flags();

@@ -1361,3 +1361,42 @@ mod readonly_enforcement {
         assert_ne!(code, 0);
     }
 }
+
+mod ifs_star_expansion {
+    use super::*;
+
+    #[test]
+    fn star_trim_with_empty_ifs() {
+        // IFS-subst-6: ${x#$*} with IFS="" should concatenate $* for trim
+        assert_output(
+            "showargs() { for s_arg in \"$@\"; do echo -n \"<$s_arg> \"; done; echo .; }; IFS=; x=abc; set -- a b; showargs ${x#$*}",
+            "<c> .\n",
+        );
+    }
+
+    #[test]
+    fn star_assign_with_empty_ifs() {
+        // IFS-subst-10: ${var=$*} with IFS="" — assign joins, result is single field
+        assert_output(
+            "showargs() { for s_arg in \"$@\"; do echo -n \"<$s_arg> \"; done; echo .; }; set -- one \"two three\" four; unset -v var; save_IFS=$IFS; IFS=; set -- ${var=$*}; IFS=$save_IFS; echo \"var=$var\"; showargs \"$@\"",
+            "var=onetwo threefour\n<onetwo threefour> .\n",
+        );
+    }
+
+    #[test]
+    fn star_alternative_with_empty_ifs() {
+        // xxx-variable-syntax-4 last case: IFS= with "" "" should produce empty $*
+        assert_output(
+            "foo() { echo \"<$*> X${*:+ }X\"; }; IFS=; foo \"\" \"\"",
+            "<> XX\n",
+        );
+    }
+
+    #[test]
+    fn star_joins_with_ifs_char() {
+        assert_output(
+            "IFS=:; set -- a b c; echo \"$*\"",
+            "a:b:c\n",
+        );
+    }
+}
