@@ -89,6 +89,8 @@ assert!(!is_builtin("rm"));
 | `.nounset(bool)` | Error on unset variables (`set -u`) |
 | `.xtrace(bool)` | Print commands before execution (`set -x`) |
 | `.pipefail(bool)` | Return highest nonzero pipeline status |
+| `.noglob(bool)` | Disable pathname expansion (`set -f`) |
+| `.noexec(bool)` | Parse only, do not execute commands (`set -n`) |
 | `.interactive(bool)` | Enable tcsetpgrp/WUNTRACED for job control |
 | `.stdout_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stdout |
 | `.stderr_sink(Arc<Mutex<dyn Write + Send>>)` | Capture stderr |
@@ -124,10 +126,14 @@ epsh handles parsing, expansion, control flow, builtins, and redirections.
 ## CLI
 
 ```sh
-epsh -c 'echo hello'          # run a command string
-epsh script.sh                 # run a script file
-echo 'echo hello' | epsh      # read from stdin (pipe)
-epsh                           # no args + tty → prints usage
+epsh -c 'echo hello'                # run a command string
+epsh -o pipefail -c 'false | true'  # enable pipefail
+epsh -f -c 'echo /*'                # disable glob expansion
+
+epsh -n script.sh                   # parse only (syntax check)
+epsh script.sh                      # run a script file
+echo 'echo hello' | epsh            # read from stdin (pipe)
+epsh                                # no args + tty → prints usage
 ```
 
 ## Performance
