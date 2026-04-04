@@ -1379,3 +1379,147 @@ mod at_expansion {
         assert_output("n() { echo $#; }; set --; n \"\"\"$@\"", "1\n");
     }
 }
+
+mod noglob {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn set_f_suppresses_glob() {
+        // With -f, * is kept literal — no pathname expansion
+        assert_output("set -f; echo /*", "/*\n");
+    }
+
+    #[test]
+    fn cli_flag_f_suppresses_glob() {
+        let out = epsh().args(["-f", "-c", "echo /*"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/*\n");
+    }
+
+    #[test]
+    fn cli_o_noglob_suppresses_glob() {
+        let out = epsh()
+            .args(["-o", "noglob", "-c", "echo /*"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/*\n");
+    }
+
+    #[test]
+    fn plus_f_re_enables_glob() {
+        // set -f then +f: glob works again
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo.txt"), "").unwrap();
+        let (stdout, _, code) = run_in(dir.path(), "set -f; set +f; echo *.txt");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "foo.txt\n");
+    }
+
+    #[test]
+    fn no_glob_no_match_keeps_literal() {
+        // Without -f, a pattern with no matches stays literal
+        assert_output("echo /no_such_path_xyz_*", "/no_such_path_xyz_*\n");
+    }
+
+    #[test]
+    fn noglob_in_subshell() {
+        // -f does not leak out of a subshell
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bar.txt"), "").unwrap();
+        let (stdout, _, code) = run_in(dir.path(), "(set -f; echo *.txt); echo *.txt");
+        assert_eq!(code, 0);
+        // inside subshell: literal; outside: expanded
+        assert_eq!(stdout, "*.txt\nbar.txt\n");
+    }
+
+    #[test]
+    fn noglob_via_shell_builder() {
+        use epsh::eval::Shell;
+        use std::sync::{Arc, Mutex};
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = buf.clone() as Arc<Mutex<dyn std::io::Write + Send>>;
+        let mut sh = Shell::builder().noglob(true).stdout_sink(sink).build();
+        sh.run_script("echo /*");
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(out, "/*\n");
+    }
+}
+
+mod noexec {
+    use super::*;
+
+    #[test]
+    fn set_n_suppresses_execution() {
+        // -n: commands are not run, no output
+        let (stdout, _, code) = run("set -n; echo should_not_print");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "");
+    }
+
+    #[test]
+    fn cli_flag_n_suppresses_execution() {
+        let out = epsh()
+            .args(["-n", "-c", "echo should_not_print"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    }
+
+    #[test]
+    fn cli_o_noexec_suppresses_execution() {
+        let out = epsh()
+            .args(["-o", "noexec", "-c", "echo should_not_print"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    }
+
+    #[test]
+    fn noexec_still_catches_parse_errors() {
+        // Syntax errors must still be reported under -n
+        let out = epsh().args(["-n", "-c", "if; then fi"]).output().unwrap();
+        assert_ne!(out.status.code().unwrap(), 0);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("syntax error"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn noexec_does_not_run_builtins() {
+        // Even builtins must be skipped under -n
+        let (stdout, _, code) = run("set -n; echo hi; printf '%s\n' bye");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "");
+    }
+
+    #[test]
+    fn noexec_does_not_run_functions() {
+        let (stdout, _, code) = run("set -n; f() { echo inside; }; f");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "");
+    }
+
+    #[test]
+    fn noexec_via_shell_builder() {
+        use epsh::eval::Shell;
+        use std::sync::{Arc, Mutex};
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = buf.clone() as Arc<Mutex<dyn std::io::Write + Send>>;
+        let mut sh = Shell::builder().noexec(true).stdout_sink(sink).build();
+        sh.run_script("echo should_not_print");
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn noexec_parse_only_success() {
+        // Valid script under -n exits 0
+        let out = epsh()
+            .args(["-n", "-c", "for x in a b c; do echo $x; done"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    }
+}

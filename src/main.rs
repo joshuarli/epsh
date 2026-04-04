@@ -38,6 +38,8 @@ fn main() {
                     "errexit" => shell.opts_mut().errexit = enable,
                     "nounset" => shell.opts_mut().nounset = enable,
                     "xtrace" => shell.opts_mut().xtrace = enable,
+                    "noglob" => shell.opts_mut().noglob = enable,
+                    "noexec" => shell.opts_mut().noexec = enable,
                     opt => {
                         eprintln!("epsh: unknown option: {opt}");
                         std::process::exit(2);
@@ -51,6 +53,8 @@ fn main() {
                         'e' => shell.opts_mut().errexit = true,
                         'u' => shell.opts_mut().nounset = true,
                         'x' => shell.opts_mut().xtrace = true,
+                        'f' => shell.opts_mut().noglob = true,
+                        'n' => shell.opts_mut().noexec = true,
                         _ => {
                             eprintln!("epsh: unknown option: -{ch}");
                             std::process::exit(2);
@@ -79,16 +83,22 @@ fn main() {
     if unsafe { libc::isatty(0) } != 0 {
         eprintln!("epsh — embeddable POSIX shell");
         eprintln!();
-        eprintln!("usage: epsh [-e] [-u] [-x] [-o option] [-c command] [script [args...]]");
+        eprintln!(
+            "usage: epsh [-e] [-u] [-x] [-f] [-n] [-o option] [-c command] [script [args...]]"
+        );
         eprintln!();
         eprintln!("  -c command       execute command string");
         eprintln!("  -e               exit on error (set -e)");
         eprintln!("  -u               error on unset variables (set -u)");
         eprintln!("  -x               print commands before execution (set -x)");
+        eprintln!("  -f               disable pathname expansion / globbing (set -f)");
+        eprintln!("  -n               parse but do not execute (syntax check) (set -n)");
         eprintln!("  -o pipefail      exit status is highest nonzero pipeline stage");
         eprintln!("  -o errexit       same as -e");
         eprintln!("  -o nounset       same as -u");
         eprintln!("  -o xtrace        same as -x");
+        eprintln!("  -o noglob        same as -f");
+        eprintln!("  -o noexec        same as -n");
         eprintln!("  +o <option>      disable option");
         eprintln!("  script           execute script file");
         eprintln!("  (no args)        read script from stdin (pipe)");

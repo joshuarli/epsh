@@ -22,6 +22,8 @@ pub trait ShellExpand {
     fn last_bg_pid(&self) -> Option<u32>;
     /// Whether set -u (nounset) is active.
     fn nounset(&self) -> bool;
+    /// Whether set -f (noglob) is active.
+    fn noglob(&self) -> bool;
 }
 
 /// An expanded word fragment with metadata for field splitting.
@@ -53,7 +55,7 @@ pub fn expand_word_to_fields(
     let mut result = Vec::new();
     let cwd = sh.cwd();
     for field in split {
-        if glob::has_glob_chars(&field) {
+        if !sh.noglob() && glob::has_glob_chars(&field) {
             let matches = glob::glob(&field, cwd);
             if matches.is_empty() {
                 // No matches: keep the pattern literal, with quote removal
@@ -859,6 +861,9 @@ mod tests {
             None
         }
         fn nounset(&self) -> bool {
+            false
+        }
+        fn noglob(&self) -> bool {
             false
         }
         fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {

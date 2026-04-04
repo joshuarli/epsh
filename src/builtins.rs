@@ -274,6 +274,8 @@ impl Shell {
                     "errexit" => self.opts.errexit = enable,
                     "nounset" => self.opts.nounset = enable,
                     "xtrace" => self.opts.xtrace = enable,
+                    "noglob" => self.opts.noglob = enable,
+                    "noexec" => self.opts.noexec = enable,
                     other => {
                         self.err_msg(&format!("set: unknown option: {other}"));
                         return ExitStatus::FAILURE;
@@ -287,6 +289,8 @@ impl Shell {
                         'e' => self.opts.errexit = enable,
                         'u' => self.opts.nounset = enable,
                         'x' => self.opts.xtrace = enable,
+                        'f' => self.opts.noglob = enable,
+                        'n' => self.opts.noexec = enable,
                         _ => {
                             self.err_msg(&format!("set: unknown option: -{ch}"));
                             return ExitStatus::FAILURE;

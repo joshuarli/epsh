@@ -129,6 +129,10 @@ pub struct ShellOpts {
     pub xtrace: bool,
     /// -o pipefail: return highest nonzero status from any pipeline stage
     pub pipefail: bool,
+    /// -f: disable pathname expansion (globbing)
+    pub noglob: bool,
+    /// -n: parse but do not execute commands (syntax check)
+    pub noexec: bool,
     /// Interactive mode: tcsetpgrp for terminal control, WUNTRACED for job control.
     pub interactive: bool,
 }
@@ -145,6 +149,12 @@ impl ShellOpts {
         }
         if self.xtrace {
             s.push('x');
+        }
+        if self.noglob {
+            s.push('f');
+        }
+        if self.noexec {
+            s.push('n');
         }
         if self.interactive {
             s.push('i');
@@ -178,6 +188,9 @@ impl expand::ShellExpand for Shell {
     fn nounset(&self) -> bool {
         self.opts.nounset
     }
+    fn noglob(&self) -> bool {
+        self.opts.noglob
+    }
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
         self.command_subst(cmd)
     }
@@ -193,6 +206,8 @@ pub struct ShellBuilder {
     nounset: bool,
     xtrace: bool,
     pipefail: bool,
+    noglob: bool,
+    noexec: bool,
     interactive: bool,
     cancel: Option<Arc<AtomicBool>>,
     stdout_sink: Option<Arc<Mutex<dyn Write + Send>>>,
@@ -216,6 +231,8 @@ impl ShellBuilder {
             nounset: false,
             xtrace: false,
             pipefail: false,
+            noglob: false,
+            noexec: false,
             interactive: false,
             cancel: None,
             stdout_sink: None,
@@ -244,6 +261,16 @@ impl ShellBuilder {
     }
     pub fn pipefail(mut self, v: bool) -> Self {
         self.pipefail = v;
+        self
+    }
+    /// Disable pathname expansion (globbing).
+    pub fn noglob(mut self, v: bool) -> Self {
+        self.noglob = v;
+        self
+    }
+    /// Parse but do not execute commands. Useful for syntax validation.
+    pub fn noexec(mut self, v: bool) -> Self {
+        self.noexec = v;
         self
     }
     /// Enable interactive mode (tcsetpgrp, WUNTRACED for job control).
@@ -299,6 +326,8 @@ impl ShellBuilder {
                 nounset: self.nounset,
                 xtrace: self.xtrace,
                 pipefail: self.pipefail,
+                noglob: self.noglob,
+                noexec: self.noexec,
                 interactive: self.interactive,
             },
             traps: HashMap::new(),
@@ -707,6 +736,9 @@ impl Shell {
     /// Evaluate a command node, returning its exit status.
     pub fn eval_command(&mut self, cmd: &Command) -> crate::error::Result<ExitStatus> {
         self.check_cancel()?;
+        if self.opts.noexec {
+            return Ok(ExitStatus::SUCCESS);
+        }
         let status = self.eval_command_inner(cmd)?;
         self.exit_status = status;
 
