@@ -2,28 +2,29 @@
 
 Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
 
-161/167 (96%) mksh conformance on dash-passable tests. 10k lines, 314 tests.
+167/167 mksh conformance on dash-passable tests. 10k lines, 376 tests, zero clippy warnings.
 
 ## Architecture
 
 ```
 src/
   lib.rs          Public API, module declarations
-  main.rs         (87)   CLI binary: epsh [-c cmd] [-e] [script.sh]
-  ast.rs          (214)  AST types: Command, Word, WordPart, Redir, ParamExpr
-  lexer.rs        (1822) Single-pass tokenizer with unified word-part builder
-  parser.rs       (1963) Recursive-descent parser, heredoc body reading
-  eval.rs         (1540) Shell struct, ShellBuilder, eval dispatch, pipelines, comsub
-  builtins.rs     (1007) 30 builtins: echo, cd, test, read, set, trap, printf, ...
-  expand.rs       (1095) Word expansion: tilde, param, arith, IFS split, glob, patterns
-  arith.rs        (815)  $((…)) evaluator with short-circuit (noeval), int var cache
-  var.rs          (345)  Variable storage with scope stack, integer cache
-  glob.rs         (316)  Custom fnmatch + pathname expansion (cwd-aware)
-  redirect.rs     (151)  FD save/restore for redirections
-  test_cmd.rs     (403)  POSIX test/[ recursive-descent evaluator
-  error.rs        (141)  ShellError enum, ExitStatus newtype, Result alias
-  encoding.rs     (108)  PUA-based byte preservation for non-UTF-8 data
-  sys.rs          (33)   Thin libc wrappers
+  main.rs         CLI binary: epsh [-c cmd] [-e] [script.sh]
+  ast.rs          AST types: Command, Word, WordPart, Redir, ParamExpr
+  lexer.rs        Single-pass tokenizer with unified word-part builder
+  parser.rs       Recursive-descent parser, heredoc body reading
+  eval.rs         Shell struct, ShellBuilder, eval dispatch, pipelines, comsub
+  builtins.rs     30 builtins: echo, cd, test, read, set, trap, printf, kill, ...
+  expand.rs       Word expansion: tilde, param, arith, IFS split, glob, patterns
+  arith.rs        $((…)) evaluator with short-circuit (noeval), int var cache
+  var.rs          Variable storage with scope stack, integer cache
+  glob.rs         Custom fnmatch + pathname expansion (cwd-aware)
+  redirect.rs     FD save/restore for redirections
+  signal.rs       Signal handler install/reset, atomic pending flags
+  test_cmd.rs     POSIX test/[ recursive-descent evaluator
+  error.rs        ShellError enum, ExitStatus newtype, Result alias
+  encoding.rs     PUA-based byte preservation for non-UTF-8 data
+  sys.rs          Thin libc wrappers
 ```
 
 ## Embedding API
@@ -67,6 +68,33 @@ let mut ish = Shell::builder()
 assert!(is_builtin("echo"));
 assert!(!is_builtin("rm"));
 ```
+
+## Testing
+
+```sh
+cargo test                                              # 376 tests
+cargo test --test api_stability                         # API surface regression
+cargo test --test embedding                             # embedding API tests
+cargo test --test integration                           # shell behavior tests
+cargo build && perl check.pl -p ./target/debug/epsh \
+  -s check-epsh.t                                       # 167/167 mksh conformance
+sh tests/stress/run.sh ./target/debug/epsh dash         # performance vs dash
+perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
+```
+
+## Performance vs dash
+
+Fork-dominated operations (typical coding agent workload) are at parity:
+
+| Operation | vs dash | Technique |
+|-----------|---------|-----------|
+| Builtin comsub | **3.6x faster** | Fork-free `$(echo ...)` |
+| Heredocs | **0.8x** | Faster than dash |
+| Pipelines | **1.1x** | posix_spawn, exec-direct |
+| External commands | **1.1x** | At parity |
+| Tight arith loops | ~28x | String allocation dominated |
+
+The arith loop gap requires integer variable representation (dash's approach).
 
 ## Design Lineage — What We Actually Took
 
@@ -162,39 +190,6 @@ dash is the conformance target. We ported these mechanisms directly:
   we can detect the pattern (Simple command with no args/assigns, one input
   redirect) before entering the fork path.
 
-## What's Left on the Table
-
-Things we know about but haven't implemented:
-
-- **Signal trap execution**: `trap` stores handlers and EXIT traps fire, but we
-  don't install actual signal handlers (SIGINT, SIGTERM, etc. use default behavior).
-  A coding agent executor might want Ctrl-C handling.
-
-- **Heredoc in nested function definitions**: The heredoc body lifecycle doesn't
-  survive through function AST storage and re-execution. Niche edge case.
-
-- **`command -v`**: Not yet implemented (the `-v` flag is skipped). Used for
-  checking command availability in scripts.
-
-## Testing
-
-```sh
-cargo test                                              # 314 tests
-cargo test --test api_stability                         # API surface regression (16)
-cargo test --test embedding                             # embedding API tests (31)
-cargo test --test integration                           # shell behavior tests (122)
-cargo build && perl check.pl -p ./target/debug/epsh \
-  -s check-epsh.t                                       # 161/167 mksh conformance
-sh tests/stress/run.sh ./target/debug/epsh dash         # performance vs dash
-perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
-```
-
-- `tests/api_stability.rs` — compile-time checks that the public API surface doesn't break
-- `tests/embedding.rs` — builder, cancellation, timeout, sinks, cwd isolation, external handler
-- `tests/integration.rs` — builtins, expansion, control flow, redirections, assignments,
-  POSIX edge cases (adapted from oils/spec/posix.test.sh and mksh test suite)
-- `tests/stress/` — 8 benchmark scripts comparing epsh vs dash
-
 ## Interactive Shell Support
 
 epsh doesn't implement interactive features directly, but provides the minimal
@@ -209,6 +204,12 @@ primitives for an interactive shell to be built on top:
 
 Everything else (prompt, history, line editing, `fg`/`bg`/`jobs`) is the
 interactive shell's responsibility.
+
+## Known Limitations
+
+- Signal traps fire between commands but not during blocking waits
+- `~user` expansion requires getpwnam (not available stdlib-only)
+- Arith loops ~28x slower than dash (string allocation; fixable with integer var repr)
 
 ## What's Not Implemented (by design)
 
