@@ -306,8 +306,9 @@ mod builtin_list {
         let stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut shell = Shell::builder().stdout_sink(stdout).build();
         for &name in BUILTIN_NAMES {
-            // Just verify they don't crash — some need args
-            let _ = shell.run_program(&parse(&format!("{name} --help 2>/dev/null")));
+            // Just verify they don't crash — some need args. Redirect stdin from
+            // /dev/null so interactive builtins like `read` get immediate EOF.
+            let _ = shell.run_program(&parse(&format!("{name} --help </dev/null 2>/dev/null")));
         }
     }
 }
