@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn epsh() -> Command {
     let bin = env!("CARGO_BIN_EXE_epsh");
@@ -450,10 +450,7 @@ mod control_flow {
 
     #[test]
     fn function_return() {
-        assert_output(
-            "f() { echo before; return 0; echo after; }; f",
-            "before\n",
-        );
+        assert_output("f() { echo before; return 0; echo after; }; f", "before\n");
     }
 
     #[test]
@@ -512,42 +509,27 @@ mod redirections {
 
     #[test]
     fn heredoc() {
-        assert_output(
-            "cat <<EOF\nhello world\nEOF",
-            "hello world\n",
-        );
+        assert_output("cat <<EOF\nhello world\nEOF", "hello world\n");
     }
 
     #[test]
     fn heredoc_expansion() {
-        assert_output(
-            "x=world; cat <<EOF\nhello $x\nEOF",
-            "hello world\n",
-        );
+        assert_output("x=world; cat <<EOF\nhello $x\nEOF", "hello world\n");
     }
 
     #[test]
     fn heredoc_quoted_no_expansion() {
-        assert_output(
-            "x=world; cat <<'EOF'\nhello $x\nEOF",
-            "hello $x\n",
-        );
+        assert_output("x=world; cat <<'EOF'\nhello $x\nEOF", "hello $x\n");
     }
 
     #[test]
     fn heredoc_strip_tabs() {
-        assert_output(
-            "cat <<-EOF\n\thello\n\tworld\nEOF",
-            "hello\nworld\n",
-        );
+        assert_output("cat <<-EOF\n\thello\n\tworld\nEOF", "hello\nworld\n");
     }
 
     #[test]
     fn multiple_heredocs() {
-        assert_output(
-            "cat <<EOF1; cat <<EOF2\none\nEOF1\ntwo\nEOF2",
-            "one\ntwo\n",
-        );
+        assert_output("cat <<EOF1; cat <<EOF2\none\nEOF1\ntwo\nEOF2", "one\ntwo\n");
     }
 
     #[test]
@@ -577,7 +559,10 @@ mod assignment {
     #[test]
     fn command_prefix_assignment() {
         // Assignment as prefix exports to that command's environment
-        assert_output("x=before; x=during env | grep '^x='; echo $x", "x=during\nbefore\n");
+        assert_output(
+            "x=before; x=during env | grep '^x='; echo $x",
+            "x=during\nbefore\n",
+        );
     }
 }
 
@@ -605,10 +590,7 @@ mod oils_posix {
 
     #[test]
     fn last_case_without_double_semi() {
-        assert_output(
-            "foo=a; case $foo in a) echo A ;; b) echo B\nesac",
-            "A\n",
-        );
+        assert_output("foo=a; case $foo in a) echo A ;; b) echo B\nesac", "A\n");
     }
 
     #[test]
@@ -618,26 +600,17 @@ mod oils_posix {
 
     #[test]
     fn case_with_optional_paren() {
-        assert_output(
-            "foo=a; case $foo in (a) echo A ;; (b) echo B\nesac",
-            "A\n",
-        );
+        assert_output("foo=a; case $foo in (a) echo A ;; (b) echo B\nesac", "A\n");
     }
 
     #[test]
     fn empty_action_last_case() {
-        assert_output(
-            "foo=b; case $foo in a) echo A ;; b)\nesac",
-            "",
-        );
+        assert_output("foo=b; case $foo in a) echo A ;; b)\nesac", "");
     }
 
     #[test]
     fn case_with_pipe_pattern() {
-        assert_output(
-            "foo=a; case $foo in a|b) echo A ;; c)\nesac",
-            "A\n",
-        );
+        assert_output("foo=a; case $foo in a|b) echo A ;; c)\nesac", "A\n");
     }
 
     #[test]
@@ -660,10 +633,7 @@ mod oils_posix {
 
     #[test]
     fn multiple_heredocs_on_one_line() {
-        assert_output(
-            "cat <<EOF1; cat <<EOF2\none\nEOF1\ntwo\nEOF2",
-            "one\ntwo\n",
-        );
+        assert_output("cat <<EOF1; cat <<EOF2\none\nEOF1\ntwo\nEOF2", "one\ntwo\n");
     }
 
     #[test]
@@ -739,7 +709,9 @@ mod glob_files {
     #[test]
     fn glob_bracket_ranges() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["-bc", "abc", "bbc", "cbc", "!bc", "^bc", "+bc", ",bc", "0bc", "1bc"] {
+        for name in [
+            "-bc", "abc", "bbc", "cbc", "!bc", "^bc", "+bc", ",bc", "0bc", "1bc",
+        ] {
             fs::write(dir.path().join(name), "").unwrap();
         }
 
@@ -815,18 +787,12 @@ mod oils_spec {
 
     #[test]
     fn comsub_word_part() {
-        assert_output(
-            "foo=FOO; echo $(echo $foo)bar$(echo $foo)",
-            "FOObarFOO\n",
-        );
+        assert_output("foo=FOO; echo $(echo $foo)bar$(echo $foo)", "FOObarFOO\n");
     }
 
     #[test]
     fn backtick_word_part() {
-        assert_output(
-            "foo=FOO; echo `echo $foo`bar`echo $foo`",
-            "FOObarFOO\n",
-        );
+        assert_output("foo=FOO; echo `echo $foo`bar`echo $foo`", "FOObarFOO\n");
     }
 
     #[test]
@@ -860,11 +826,7 @@ mod oils_spec {
 
     #[test]
     fn errexit_brace_group() {
-        assert_stdout_status(
-            "set -o errexit; { echo one; false; echo two; }",
-            "one\n",
-            1,
-        );
+        assert_stdout_status("set -o errexit; { echo one; false; echo two; }", "one\n", 1);
     }
 
     #[test]
@@ -894,18 +856,12 @@ mod oils_spec {
 
     #[test]
     fn assignment_no_word_splitting() {
-        assert_output(
-            r#"words='one two'; a=$words; echo "$a""#,
-            "one two\n",
-        );
+        assert_output(r#"words='one two'; a=$words; echo "$a""#, "one two\n");
     }
 
     #[test]
     fn assignment_no_glob() {
-        assert_output(
-            r#"a='*.nope'; b=$a; echo "$b""#,
-            "*.nope\n",
-        );
+        assert_output(r#"a='*.nope'; b=$a; echo "$b""#, "*.nope\n");
     }
 
     #[test]
@@ -960,7 +916,10 @@ mod nounset {
 
     #[test]
     fn assign_op_bypasses() {
-        assert_output("set -u; echo ${UNSET=assigned}; echo $UNSET", "assigned\nassigned\n");
+        assert_output(
+            "set -u; echo ${UNSET=assigned}; echo $UNSET",
+            "assigned\nassigned\n",
+        );
     }
 
     #[test]
@@ -1044,9 +1003,7 @@ mod exec_redirects {
         // After exec > file, output goes to the file, not terminal
         let tmp = format!("/tmp/epsh_test_exec_out_{}", std::process::id());
         let _ = std::fs::remove_file(&tmp);
-        let (stdout, _, code) = run(
-            &format!("exec > {tmp}; echo hello")
-        );
+        let (stdout, _, code) = run(&format!("exec > {tmp}; echo hello"));
         assert_eq!(code, 0);
         assert_eq!(stdout, "");
         let contents = std::fs::read_to_string(&tmp).unwrap();
@@ -1058,9 +1015,7 @@ mod exec_redirects {
     fn exec_append_redirect() {
         let tmp = format!("/tmp/epsh_test_exec_app_{}", std::process::id());
         let _ = std::fs::remove_file(&tmp);
-        let (_, _, code) = run(
-            &format!("echo first > {tmp}; exec >> {tmp}; echo second")
-        );
+        let (_, _, code) = run(&format!("echo first > {tmp}; exec >> {tmp}; echo second"));
         assert_eq!(code, 0);
         let contents = std::fs::read_to_string(&tmp).unwrap();
         assert_eq!(contents, "first\nsecond\n");
@@ -1076,9 +1031,9 @@ mod exec_redirects {
     fn exec_close_fd() {
         let tmp = format!("/tmp/epsh_test_exec_close_{}", std::process::id());
         let _ = std::fs::remove_file(&tmp);
-        let (stdout, _, code) = run(
-            &format!("exec 3>{tmp}; echo via_fd3 >&3; exec 3>&-; cat {tmp}")
-        );
+        let (stdout, _, code) = run(&format!(
+            "exec 3>{tmp}; echo via_fd3 >&3; exec 3>&-; cat {tmp}"
+        ));
         assert_eq!(code, 0);
         assert_eq!(stdout, "via_fd3\n");
         let _ = std::fs::remove_file(&tmp);
@@ -1088,9 +1043,9 @@ mod exec_redirects {
     fn exec_read_write() {
         let tmp = format!("/tmp/epsh_test_exec_rw_{}", std::process::id());
         let _ = std::fs::remove_file(&tmp);
-        let (stdout, _, code) = run(
-            &format!("echo content > {tmp}; exec 4<>{tmp}; read line <&4; echo $line")
-        );
+        let (stdout, _, code) = run(&format!(
+            "echo content > {tmp}; exec 4<>{tmp}; read line <&4; echo $line"
+        ));
         assert_eq!(code, 0);
         assert_eq!(stdout, "content\n");
         let _ = std::fs::remove_file(&tmp);
@@ -1120,9 +1075,8 @@ mod read_builtin {
     #[test]
     fn read_while_loop_eof() {
         // while read should process all complete lines, stop at EOF
-        let (stdout, _, code) = run(
-            "printf 'a\\nb\\n' | { n=0; while read line; do n=$((n+1)); done; echo $n; }"
-        );
+        let (stdout, _, code) =
+            run("printf 'a\\nb\\n' | { n=0; while read line; do n=$((n+1)); done; echo $n; }");
         assert_eq!(code, 0);
         assert_eq!(stdout, "2\n");
     }
@@ -1131,7 +1085,7 @@ mod read_builtin {
     fn read_while_loop_partial_last_line() {
         // The partial last line is available after the loop
         let (stdout, _, _) = run(
-            "printf 'a\\nb\\npartial' | { while read line; do echo $line; done; echo \"last=$line\"; }"
+            "printf 'a\\nb\\npartial' | { while read line; do echo $line; done; echo \"last=$line\"; }",
         );
         assert_eq!(stdout, "a\nb\nlast=partial\n");
     }
@@ -1140,7 +1094,7 @@ mod read_builtin {
     fn read_multiple_vars() {
         assert_output(
             "echo 'one two three four' | { read a b c; echo \"a=$a b=$b c=$c\"; }",
-            "a=one b=two c=three four\n"
+            "a=one b=two c=three four\n",
         );
     }
 }
@@ -1171,18 +1125,12 @@ mod heredoc_in_compounds {
 
     #[test]
     fn heredoc_in_nested_function() {
-        assert_output(
-            "f() { g() { cat <<EOF\nnested\nEOF\n}; g; }; f",
-            "nested\n",
-        );
+        assert_output("f() { g() { cat <<EOF\nnested\nEOF\n}; g; }; f", "nested\n");
     }
 
     #[test]
     fn heredoc_in_for_loop() {
-        assert_output(
-            "for i in a b; do cat <<EOF\n$i\nEOF\ndone",
-            "a\nb\n",
-        );
+        assert_output("for i in a b; do cat <<EOF\n$i\nEOF\ndone", "a\nb\n");
     }
 
     #[test]
@@ -1200,10 +1148,7 @@ mod heredoc_in_compounds {
 
     #[test]
     fn heredoc_in_case() {
-        assert_output(
-            "case x in x) cat <<EOF\nmatched\nEOF\n;; esac",
-            "matched\n",
-        );
+        assert_output("case x in x) cat <<EOF\nmatched\nEOF\n;; esac", "matched\n");
     }
 
     #[test]
@@ -1243,7 +1188,7 @@ mod dot_return {
     #[test]
     fn return_exits_dot_script() {
         let (stdout, _, code) = run(
-            "echo 'echo before; return 0; echo after' > /tmp/epsh_dot_ret_$$.sh; . /tmp/epsh_dot_ret_$$.sh; echo continued; rm -f /tmp/epsh_dot_ret_$$.sh"
+            "echo 'echo before; return 0; echo after' > /tmp/epsh_dot_ret_$$.sh; . /tmp/epsh_dot_ret_$$.sh; echo continued; rm -f /tmp/epsh_dot_ret_$$.sh",
         );
         assert_eq!(stdout, "before\ncontinued\n");
         assert_eq!(code, 0);
@@ -1252,7 +1197,7 @@ mod dot_return {
     #[test]
     fn return_with_status_from_dot_script() {
         let (stdout, _, code) = run(
-            "echo 'return 42' > /tmp/epsh_dot_ret2_$$.sh; . /tmp/epsh_dot_ret2_$$.sh; echo \"rc=$?\"; rm -f /tmp/epsh_dot_ret2_$$.sh"
+            "echo 'return 42' > /tmp/epsh_dot_ret2_$$.sh; . /tmp/epsh_dot_ret2_$$.sh; echo \"rc=$?\"; rm -f /tmp/epsh_dot_ret2_$$.sh",
         );
         assert_eq!(stdout, "rc=42\n");
         assert_eq!(code, 0);
@@ -1309,16 +1254,16 @@ mod set_dash {
         // With xtrace on, "echo hello" would produce "+ echo hello\n" on stderr
         let (stdout, stderr, code) = run("set -x; set -; echo hello");
         assert_eq!(stdout, "hello\n");
-        assert!(!stderr.contains("+ echo"), "xtrace should be off after 'set -', got stderr: {stderr}");
+        assert!(
+            !stderr.contains("+ echo"),
+            "xtrace should be off after 'set -', got stderr: {stderr}"
+        );
         assert_eq!(code, 0);
     }
 
     #[test]
     fn set_dashdash_stops_flag_processing() {
-        assert_output(
-            "set -- -a -b -c; echo $1 $2 $3",
-            "-a -b -c\n",
-        );
+        assert_output("set -- -a -b -c; echo $1 $2 $3", "-a -b -c\n");
     }
 }
 
@@ -1394,10 +1339,7 @@ mod ifs_star_expansion {
 
     #[test]
     fn star_joins_with_ifs_char() {
-        assert_output(
-            "IFS=:; set -- a b c; echo \"$*\"",
-            "a:b:c\n",
-        );
+        assert_output("IFS=:; set -- a b c; echo \"$*\"", "a:b:c\n");
     }
 }
 
@@ -1407,19 +1349,13 @@ mod at_expansion {
     #[test]
     fn quoted_at_merges_prefix() {
         // """$@" — empty prefix merges with first $@ element
-        assert_output(
-            "n() { echo $#; }; set -- a b; n \"\"\"$@\"",
-            "2\n",
-        );
+        assert_output("n() { echo $#; }; set -- a b; n \"\"\"$@\"", "2\n");
     }
 
     #[test]
     fn quoted_at_merges_suffix() {
         // "$@""" — empty suffix merges with last $@ element
-        assert_output(
-            "n() { echo $#; }; set -- a b; n \"$@\"\"\"",
-            "2\n",
-        );
+        assert_output("n() { echo $#; }; set -- a b; n \"$@\"\"\"", "2\n");
     }
 
     #[test]
@@ -1434,18 +1370,12 @@ mod at_expansion {
     #[test]
     fn empty_at_produces_nothing() {
         // "$@" with no positionals produces zero fields
-        assert_output(
-            "n() { echo $#; }; set --; n \"$@\"",
-            "0\n",
-        );
+        assert_output("n() { echo $#; }; set --; n \"$@\"", "0\n");
     }
 
     #[test]
     fn empty_at_with_prefix_produces_one() {
         // """$@" with no positionals — prefix "" exists, $@ empty → 1 field
-        assert_output(
-            "n() { echo $#; }; set --; n \"\"\"$@\"",
-            "1\n",
-        );
+        assert_output("n() { echo $#; }; set --; n \"\"\"$@\"", "1\n");
     }
 }

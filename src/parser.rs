@@ -69,10 +69,12 @@ impl Parser {
                 // Dash reads heredoc bodies at newlines (parseheredoc in readtoken).
                 // We store a dummy command for patching if there are pending heredocs.
                 if !self.lexer.pending_heredocs.is_empty() {
-                    let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+                    let pending: Vec<PendingHereDoc> =
+                        self.lexer.pending_heredocs.drain(..).collect();
                     for heredoc in &pending {
                         let raw = self.lexer.read_heredoc_body(heredoc)?;
-                        self.heredoc_bodies.push(make_heredoc_body(raw, heredoc.quoted));
+                        self.heredoc_bodies
+                            .push(make_heredoc_body(raw, heredoc.quoted));
                     }
                 }
             } else {
@@ -127,7 +129,12 @@ impl Parser {
             Command::FuncDef { body, .. } => {
                 Self::patch_heredocs_inner(body, bodies, idx);
             }
-            Command::If { cond, then_part, else_part, .. } => {
+            Command::If {
+                cond,
+                then_part,
+                else_part,
+                ..
+            } => {
                 Self::patch_heredocs_inner(cond, bodies, idx);
                 Self::patch_heredocs_inner(then_part, bodies, idx);
                 if let Some(e) = else_part {
@@ -227,10 +234,12 @@ impl Parser {
                     self.next()?;
                     // Read heredoc bodies that follow this newline
                     if !self.lexer.pending_heredocs.is_empty() {
-                        let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+                        let pending: Vec<PendingHereDoc> =
+                            self.lexer.pending_heredocs.drain(..).collect();
                         for heredoc in &pending {
                             let raw = self.lexer.read_heredoc_body(heredoc)?;
-                            self.heredoc_bodies.push(make_heredoc_body(raw, heredoc.quoted));
+                            self.heredoc_bodies
+                                .push(make_heredoc_body(raw, heredoc.quoted));
                         }
                     }
                     self.skip_newlines()?;
@@ -359,7 +368,10 @@ impl Parser {
                     self.next()?;
                     assigns.push(Assignment {
                         name: name.clone(),
-                        value: Word { parts: value.clone(), span: tok_span },
+                        value: Word {
+                            parts: value.clone(),
+                            span: tok_span,
+                        },
                         span: tok_span,
                     });
                 }
@@ -408,7 +420,10 @@ impl Parser {
                                 });
                             }
                         }
-                        args.push(Word { parts: parts.clone(), span: tok_span });
+                        args.push(Word {
+                            parts: parts.clone(),
+                            span: tok_span,
+                        });
                         continue;
                     }
 
@@ -430,7 +445,10 @@ impl Parser {
                         }
                     }
 
-                    args.push(Word { parts: parts.clone(), span: tok_span });
+                    args.push(Word {
+                        parts: parts.clone(),
+                        span: tok_span,
+                    });
                 }
                 // After command name, assignment tokens are treated as regular args
                 // (e.g., `local X=value`, `export FOO=bar`)
@@ -438,7 +456,10 @@ impl Parser {
                     self.next()?;
                     let mut parts = vec![WordPart::Literal(format!("{}=", name))];
                     parts.extend(value.clone());
-                    args.push(Word { parts, span: tok_span });
+                    args.push(Word {
+                        parts,
+                        span: tok_span,
+                    });
                 }
                 // Reserved words used as arguments (after command name)
                 tok if args.is_empty() && !tok.is_redir() => break,
@@ -546,7 +567,10 @@ impl Parser {
                 let (word_tok, word_span) = self.next()?;
                 self.lexer.recognize_reserved = true;
                 let word = match word_tok {
-                    Token::Word(parts, _) => Word { parts, span: word_span },
+                    Token::Word(parts, _) => Word {
+                        parts,
+                        span: word_span,
+                    },
                     // Accept reserved words as filenames
                     ref tok => {
                         let text = reserved_word_text(tok);
@@ -624,9 +648,7 @@ impl Parser {
 
         let (tok, _) = self.peek()?;
         let else_part = match tok {
-            Token::Elif => {
-                Some(Box::new(self.parse_elif()?))
-            }
+            Token::Elif => Some(Box::new(self.parse_elif()?)),
             Token::Else => {
                 self.next()?;
                 self.skip_newlines()?;
@@ -792,7 +814,10 @@ impl Parser {
                 match tok {
                     Token::Word(parts, _) => {
                         self.next()?;
-                        words.push(Word { parts: parts.clone(), span: tok_span });
+                        words.push(Word {
+                            parts: parts.clone(),
+                            span: tok_span,
+                        });
                     }
                     Token::Semi | Token::Newline => {
                         self.next()?;
@@ -845,7 +870,10 @@ impl Parser {
         let (word_tok, word_span) = self.next()?;
         self.lexer.recognize_reserved = true;
         let word = match word_tok {
-            Token::Word(parts, _) => Word { parts, span: word_span },
+            Token::Word(parts, _) => Word {
+                parts,
+                span: word_span,
+            },
             other => {
                 return Err(ShellError::Syntax {
                     msg: format!("expected word after 'case', got {other:?}"),
@@ -898,7 +926,10 @@ impl Parser {
             let (tok, tok_span) = self.next()?;
             self.lexer.recognize_reserved = true;
             let pat = match tok {
-                Token::Word(parts, _) => Word { parts, span: tok_span },
+                Token::Word(parts, _) => Word {
+                    parts,
+                    span: tok_span,
+                },
                 ref other => {
                     let text = reserved_word_text(other);
                     if text.is_empty() {
@@ -972,7 +1003,8 @@ impl Parser {
                         redirs.push(redir);
                     } else {
                         // Not a redirect — push back the digit word
-                        self.lexer.push_back(Token::Word(parts.clone(), false), span);
+                        self.lexer
+                            .push_back(Token::Word(parts.clone(), false), span);
                         break;
                     }
                 } else {
@@ -1644,7 +1676,6 @@ fn reserved_word_text(tok: &Token) -> &'static str {
         _ => "",
     }
 }
-
 
 #[cfg(test)]
 mod tests {

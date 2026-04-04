@@ -6,12 +6,11 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Verify all public modules are accessible
-use epsh::arith;
 use epsh::ast;
 use epsh::builtins;
 use epsh::encoding;
@@ -40,9 +39,7 @@ fn shell_builder_methods() {
     // Every builder method returns Self for chaining
     let cancel = Arc::new(AtomicBool::new(false));
     let sink: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let handler: eval::ExternalHandler = Box::new(|_args, _env| {
-        Ok(error::ExitStatus::SUCCESS)
-    });
+    let handler: eval::ExternalHandler = Box::new(|_args, _env| Ok(error::ExitStatus::SUCCESS));
     let _shell = eval::Shell::builder()
         .cwd(PathBuf::from("/"))
         .errexit(true)
@@ -71,7 +68,7 @@ fn shell_public_methods() {
     let _status: error::ExitStatus = shell.run_program(&program);
 
     // set/get methods
-    shell.set_var("X", "1");
+    let _ = shell.set_var("X", "1");
     let _val: Option<&str> = shell.get_var("X");
     shell.set_args(&["arg0", "arg1"]);
     shell.set_cwd(PathBuf::from("/tmp"));
@@ -152,14 +149,17 @@ fn shell_error_api() {
         span: error::Span::default(),
     };
     let _ = error::ShellError::CommandNotFound("x".into());
-    let _ = error::ShellError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"));
+    let _ = error::ShellError::Io(std::io::Error::other("test"));
     let _ = error::ShellError::Runtime {
         msg: "test".into(),
         span: error::Span::default(),
     };
     let cancelled = error::ShellError::Cancelled;
     let timed_out = error::ShellError::TimedOut;
-    let stopped = error::ShellError::Stopped { pid: 1234, pgid: 1234 };
+    let stopped = error::ShellError::Stopped {
+        pid: 1234,
+        pgid: 1234,
+    };
 
     // Helper methods
     assert!(cancelled.is_cancelled());
@@ -182,7 +182,7 @@ fn shell_error_api() {
     let _ = err.source();
 
     // From<io::Error>
-    let _: error::ShellError = std::io::Error::new(std::io::ErrorKind::Other, "test").into();
+    let _: error::ShellError = std::io::Error::other("test").into();
 }
 
 #[test]
@@ -208,7 +208,12 @@ fn ast_types_accessible() {
     // Command variants are matchable
     let program = parser::Parser::new("echo hi").parse().unwrap();
     match &program.commands[0] {
-        ast::Command::Simple { assigns, args, redirs, span: _ } => {
+        ast::Command::Simple {
+            assigns,
+            args,
+            redirs,
+            span: _,
+        } => {
             let _: &Vec<ast::Assignment> = assigns;
             let _: &Vec<ast::Word> = args;
             let _: &Vec<ast::Redir> = redirs;
@@ -298,7 +303,11 @@ fn variables_api() {
 
 #[test]
 fn span_api() {
-    let span = error::Span { offset: 0, line: 1, col: 1 };
+    let span = error::Span {
+        offset: 0,
+        line: 1,
+        col: 1,
+    };
     let _default = error::Span::default();
     assert_eq!(format!("{span}"), "1:1");
     let _ = format!("{span:?}");
@@ -315,5 +324,7 @@ fn lexer_ctlesc_public() {
 #[test]
 fn result_type_alias() {
     // error::Result<T> is available
-    fn _example() -> error::Result<()> { Ok(()) }
+    fn _example() -> error::Result<()> {
+        Ok(())
+    }
 }

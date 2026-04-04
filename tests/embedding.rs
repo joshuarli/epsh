@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use epsh::ast::Program;
-use epsh::builtins::{is_builtin, BUILTIN_NAMES};
-use epsh::error::{ExitStatus, ShellError};
-use epsh::eval::{Shell, ShellBuilder};
+use epsh::builtins::{BUILTIN_NAMES, is_builtin};
+use epsh::error::ExitStatus;
+use epsh::eval::Shell;
 use epsh::parser::Parser;
 
 fn parse(src: &str) -> Program {
@@ -95,7 +95,7 @@ mod parse_then_execute {
     fn reuse_parsed_program() {
         let program = parse("x=$((x + 1)); echo $x");
         let mut shell = Shell::new();
-        shell.set_var("x", "0");
+        let _ = shell.set_var("x", "0");
         shell.run_program(&program);
         assert_eq!(shell.get_var("x"), Some("1"));
         shell.run_program(&program);
@@ -362,9 +362,7 @@ mod external_handler {
 
     #[test]
     fn handler_exit_status_propagates() {
-        let handler: ExternalHandler = Box::new(|_args, _env| {
-            Ok(ExitStatus::from(42))
-        });
+        let handler: ExternalHandler = Box::new(|_args, _env| Ok(ExitStatus::from(42)));
         let mut shell = Shell::builder().external_handler(handler).build();
         let status = shell.run_program(&parse("mycmd"));
         assert_eq!(status.code(), 42);
@@ -377,7 +375,7 @@ mod variables {
     #[test]
     fn set_get_var() {
         let mut shell = Shell::new();
-        shell.set_var("MY_VAR", "hello");
+        let _ = shell.set_var("MY_VAR", "hello");
         assert_eq!(shell.get_var("MY_VAR"), Some("hello"));
     }
 

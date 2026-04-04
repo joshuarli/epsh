@@ -30,7 +30,12 @@ pub fn glob(pattern: &str, cwd: &Path) -> Vec<String> {
 
     // Start matching from the first component
     if components[0] == "/" {
-        glob_recursive(&PathBuf::from("/"), &PathBuf::from("/"), &components[1..], &mut results);
+        glob_recursive(
+            &PathBuf::from("/"),
+            &PathBuf::from("/"),
+            &components[1..],
+            &mut results,
+        );
         return sort_results(results);
     }
 
@@ -41,7 +46,12 @@ pub fn glob(pattern: &str, cwd: &Path) -> Vec<String> {
 
 /// `fs_dir`: actual filesystem directory to read from
 /// `display_dir`: path prefix for result strings (relative to original pattern)
-fn glob_recursive(fs_dir: &Path, display_dir: &Path, components: &[&str], results: &mut Vec<String>) {
+fn glob_recursive(
+    fs_dir: &Path,
+    display_dir: &Path,
+    components: &[&str],
+    results: &mut Vec<String>,
+) {
     if components.is_empty() {
         return;
     }

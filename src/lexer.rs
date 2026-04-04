@@ -384,7 +384,13 @@ impl Lexer {
         // Check for assignment words: name=value
         // The parts start with a Literal containing "name=..." — split it
         if let Some((name, value_parts)) = try_split_assignment(&parts) {
-            return Ok((Token::Assignment { name, value: value_parts }, span));
+            return Ok((
+                Token::Assignment {
+                    name,
+                    value: value_parts,
+                },
+                span,
+            ));
         }
 
         // IO_NUMBER detection: if word is 1-2 digits, no quoting, and next char
@@ -440,8 +446,9 @@ impl Lexer {
                     if ctx == WordCtx::Word {
                         if !in_dquote {
                             match ch {
-                                ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<'
-                                | '>' => break,
+                                ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>' => {
+                                    break;
+                                }
                                 '#' if parts.is_empty() && literal.is_empty() => break,
                                 _ => {}
                             }
@@ -479,7 +486,6 @@ impl Lexer {
                             parts.extend(inner);
                         }
                         // ('"' if in_dquote && ctx == Word is caught by termination above)
-
                         '\'' if !in_dquote => {
                             if !literal.is_empty() {
                                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
@@ -566,7 +572,9 @@ impl Lexer {
                             self.advance(); // consume ~
                             let mut user = String::new();
                             while let Some(c) = self.peek() {
-                                if c == '/' || c == ':' || c.is_whitespace()
+                                if c == '/'
+                                    || c == ':'
+                                    || c.is_whitespace()
                                     || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
                                 {
                                     break;
@@ -594,10 +602,7 @@ impl Lexer {
     }
 
     /// Read parts inside double quotes until closing `"`.
-    fn read_dquote_parts(
-        &mut self,
-        span: Span,
-    ) -> std::result::Result<Vec<WordPart>, ShellError> {
+    fn read_dquote_parts(&mut self, span: Span) -> std::result::Result<Vec<WordPart>, ShellError> {
         let (parts, _) = self.read_word_parts(WordCtx::Word, true, span)?;
         // Consume the closing "
         match self.peek() {
@@ -697,7 +702,14 @@ impl Lexer {
                 } else if n == '}' {
                     // ${#} — value of $# (not length)
                     length = false;
-                } else if n == '#' || n == '?' || n == '-' || n == '!' || n == '$' || n == '@' || n == '*' {
+                } else if n == '#'
+                    || n == '?'
+                    || n == '-'
+                    || n == '!'
+                    || n == '$'
+                    || n == '@'
+                    || n == '*'
+                {
                     // ${##...} ${#?} etc — check if it's ${#X} or ${X op}
                     // If char after the special param is }, it's length. Otherwise it's a param+op.
                     let after = self.src.get(self.pos + 2).copied();

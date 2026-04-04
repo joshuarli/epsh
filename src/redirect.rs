@@ -127,7 +127,10 @@ impl Shell {
                     let expanded = match body {
                         HereDocBody::Literal(s) => s.clone(),
                         HereDocBody::Parsed(parts) => {
-                            let word = Word { parts: parts.clone(), span: redir.span };
+                            let word = Word {
+                                parts: parts.clone(),
+                                span: redir.span,
+                            };
                             self.expand_string(&word)?
                         }
                     };

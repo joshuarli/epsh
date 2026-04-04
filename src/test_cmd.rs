@@ -13,7 +13,11 @@ pub(crate) fn test_eval(args: &[&str]) -> ExitStatus {
         eprintln!("test: too many arguments");
         return ExitStatus::MISUSE;
     }
-    if result { ExitStatus::SUCCESS } else { ExitStatus::FAILURE }
+    if result {
+        ExitStatus::SUCCESS
+    } else {
+        ExitStatus::FAILURE
+    }
 }
 
 fn test_or(args: &[&str], pos: &mut usize) -> bool {

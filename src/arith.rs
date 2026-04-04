@@ -510,23 +510,63 @@ impl<'a> ArithParser<'a> {
             ArithToken::BitOr => left | right,
             ArithToken::BitXor => left ^ right,
             ArithToken::BitAnd => left & right,
-            ArithToken::Eq => if left == right { 1 } else { 0 },
-            ArithToken::Ne => if left != right { 1 } else { 0 },
-            ArithToken::Lt => if left < right { 1 } else { 0 },
-            ArithToken::Le => if left <= right { 1 } else { 0 },
-            ArithToken::Gt => if left > right { 1 } else { 0 },
-            ArithToken::Ge => if left >= right { 1 } else { 0 },
+            ArithToken::Eq => {
+                if left == right {
+                    1
+                } else {
+                    0
+                }
+            }
+            ArithToken::Ne => {
+                if left != right {
+                    1
+                } else {
+                    0
+                }
+            }
+            ArithToken::Lt => {
+                if left < right {
+                    1
+                } else {
+                    0
+                }
+            }
+            ArithToken::Le => {
+                if left <= right {
+                    1
+                } else {
+                    0
+                }
+            }
+            ArithToken::Gt => {
+                if left > right {
+                    1
+                } else {
+                    0
+                }
+            }
+            ArithToken::Ge => {
+                if left >= right {
+                    1
+                } else {
+                    0
+                }
+            }
             ArithToken::Shl => left << right,
             ArithToken::Shr => left >> right,
             ArithToken::Plus => left + right,
             ArithToken::Minus => left - right,
             ArithToken::Star => left * right,
             ArithToken::Slash => {
-                if right == 0 { return Err("division by zero".into()); }
+                if right == 0 {
+                    return Err("division by zero".into());
+                }
                 left / right
             }
             ArithToken::Percent => {
-                if right == 0 { return Err("division by zero".into()); }
+                if right == 0 {
+                    return Err("division by zero".into());
+                }
                 left % right
             }
             _ => return Ok(None),

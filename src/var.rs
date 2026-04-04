@@ -40,7 +40,11 @@ pub struct Var {
 impl Var {
     fn new(value: Option<String>, flags: VarFlags) -> Self {
         let int_cache = value.as_deref().and_then(|s| s.parse::<i64>().ok());
-        Var { value, flags, int_cache }
+        Var {
+            value,
+            flags,
+            int_cache,
+        }
     }
 }
 
@@ -79,7 +83,10 @@ impl Variables {
     /// Create variables with no inherited environment.
     pub fn new_clean() -> Self {
         let mut vars = HashMap::new();
-        vars.insert("IFS".into(), Var::new(Some(" \t\n".into()), VarFlags::new()));
+        vars.insert(
+            "IFS".into(),
+            Var::new(Some(" \t\n".into()), VarFlags::new()),
+        );
         Variables {
             vars,
             scopes: Vec::new(),
@@ -100,7 +107,10 @@ impl Variables {
 
         // Set default IFS
         if !vars.contains_key("IFS") {
-            vars.insert("IFS".into(), Var::new(Some(" \t\n".into()), VarFlags::new()));
+            vars.insert(
+                "IFS".into(),
+                Var::new(Some(" \t\n".into()), VarFlags::new()),
+            );
         }
 
         Variables {
@@ -124,7 +134,9 @@ impl Variables {
             return Err(format!("{name}: readonly variable"));
         }
 
-        let entry = self.vars.entry(name.to_string())
+        let entry = self
+            .vars
+            .entry(name.to_string())
             .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.value = Some(value.to_string());
         entry.int_cache = value.parse::<i64>().ok();
@@ -165,11 +177,14 @@ impl Variables {
         }
 
         let s = value.to_string();
-        self.vars.insert(name.to_string(), Var {
-            value: Some(s),
-            flags: VarFlags::new(),
-            int_cache: Some(value),
-        });
+        self.vars.insert(
+            name.to_string(),
+            Var {
+                value: Some(s),
+                flags: VarFlags::new(),
+                int_cache: Some(value),
+            },
+        );
         Ok(())
     }
 
@@ -188,7 +203,9 @@ impl Variables {
 
     /// Mark a variable as exported.
     pub fn export(&mut self, name: &str) {
-        let entry = self.vars.entry(name.to_string())
+        let entry = self
+            .vars
+            .entry(name.to_string())
             .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::EXPORT);
         if let Some(ref value) = entry.value {
@@ -199,7 +216,9 @@ impl Variables {
 
     /// Mark a variable as readonly.
     pub fn set_readonly(&mut self, name: &str) {
-        let entry = self.vars.entry(name.to_string())
+        let entry = self
+            .vars
+            .entry(name.to_string())
             .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::READONLY);
     }
@@ -342,17 +361,35 @@ mod tests {
     fn positional_params() {
         let mut vars = Variables::new();
         vars.positional = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(vars.get_special("#", ExitStatus::SUCCESS, 1, "", None), Some("3".into()));
-        assert_eq!(vars.get_special("1", ExitStatus::SUCCESS, 1, "", None), Some("a".into()));
-        assert_eq!(vars.get_special("3", ExitStatus::SUCCESS, 1, "", None), Some("c".into()));
-        assert_eq!(vars.get_special("4", ExitStatus::SUCCESS, 1, "", None), None);
+        assert_eq!(
+            vars.get_special("#", ExitStatus::SUCCESS, 1, "", None),
+            Some("3".into())
+        );
+        assert_eq!(
+            vars.get_special("1", ExitStatus::SUCCESS, 1, "", None),
+            Some("a".into())
+        );
+        assert_eq!(
+            vars.get_special("3", ExitStatus::SUCCESS, 1, "", None),
+            Some("c".into())
+        );
+        assert_eq!(
+            vars.get_special("4", ExitStatus::SUCCESS, 1, "", None),
+            None
+        );
     }
 
     #[test]
     fn special_params() {
         let vars = Variables::new();
-        assert_eq!(vars.get_special("?", ExitStatus::from(42), 1234, "", None), Some("42".into()));
-        assert_eq!(vars.get_special("$", ExitStatus::SUCCESS, 1234, "", None), Some("1234".into()));
+        assert_eq!(
+            vars.get_special("?", ExitStatus::from(42), 1234, "", None),
+            Some("42".into())
+        );
+        assert_eq!(
+            vars.get_special("$", ExitStatus::SUCCESS, 1234, "", None),
+            Some("1234".into())
+        );
     }
 
     #[test]

@@ -97,9 +97,7 @@ pub fn expand_pattern(
             }
             WordPart::DoubleQuoted(inner) => {
                 // Double-quoted — expand inner parts but escape glob chars
-                let inner_expanded = expand_word_parts_inner(
-                    inner, sh, true, false,
-                )?;
+                let inner_expanded = expand_word_parts_inner(inner, sh, true, false)?;
                 let text: String = inner_expanded.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
@@ -120,9 +118,7 @@ pub fn expand_pattern(
             }
             _ => {
                 // Other parts (CmdSubst, Arith, etc.) — expand and escape
-                let frags = expand_word_parts_inner(
-                    std::slice::from_ref(part), sh, true, false,
-                )?;
+                let frags = expand_word_parts_inner(std::slice::from_ref(part), sh, true, false)?;
                 let text: String = frags.into_iter().map(|f| f.value).collect();
                 for c in text.chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
@@ -209,11 +205,8 @@ fn expand_word_parts_inner(
                             {
                                 found_at = true;
                             } else {
-                                let expanded = expand_word_parts(
-                                    std::slice::from_ref(p),
-                                    sh,
-                                    true,
-                                )?;
+                                let expanded =
+                                    expand_word_parts(std::slice::from_ref(p), sh, true)?;
                                 for f in expanded {
                                     prefix.push_str(&f.value);
                                 }
@@ -222,11 +215,7 @@ fn expand_word_parts_inner(
                             suffix_parts.push(p.clone());
                         }
                     }
-                    let suffix_frags = expand_word_parts(
-                        &suffix_parts,
-                        sh,
-                        true,
-                    )?;
+                    let suffix_frags = expand_word_parts(&suffix_parts, sh, true)?;
                     let suffix: String = suffix_frags.into_iter().map(|f| f.value).collect();
 
                     if sh.vars().positional.is_empty() {
@@ -252,8 +241,7 @@ fn expand_word_parts_inner(
                     }
                 } else {
                     // No $@ — normal double-quote handling
-                    let expanded =
-                        expand_word_parts(inner, sh, true)?;
+                    let expanded = expand_word_parts(inner, sh, true)?;
                     let value: String = expanded.into_iter().map(|f| f.value).collect();
                     result.push(ExpandedWord {
                         value,
@@ -277,7 +265,12 @@ fn expand_word_parts_inner(
                 // $* in quoted context: join with first char of IFS
                 else if param.name == "*" && matches!(param.op, ParamOp::Normal) && quoted_context
                 {
-                    let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+                    let sep = sh
+                        .vars()
+                        .ifs()
+                        .chars()
+                        .next()
+                        .map_or(String::new(), |c| c.to_string());
                     let value = sh.vars().positional.join(&sep);
                     result.push(ExpandedWord {
                         value,
@@ -300,11 +293,7 @@ fn expand_word_parts_inner(
                         });
                     }
                 } else {
-                    let frags = expand_param_to_fragments(
-                        param,
-                        sh,
-                        quoted_context,
-                    )?;
+                    let frags = expand_param_to_fragments(param, sh, quoted_context)?;
                     result.extend(frags);
                 }
             }
@@ -326,11 +315,10 @@ fn expand_word_parts_inner(
             }
             WordPart::Arith(inner) => {
                 // First expand any variables in the arithmetic expression
-                let text: String =
-                    expand_word_parts(inner, sh, true)?
-                        .into_iter()
-                        .map(|f| f.value)
-                        .collect();
+                let text: String = expand_word_parts(inner, sh, true)?
+                    .into_iter()
+                    .map(|f| f.value)
+                    .collect();
                 // Then evaluate the arithmetic
                 let exit_status = sh.exit_status();
                 let shell_pid = sh.pid();
@@ -362,14 +350,20 @@ fn expand_param_to_fragments(
 
     // $* and $@ join with first char of IFS when used as a scalar
     let raw_value = if name == "*" || name == "@" {
-        let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+        let sep = sh
+            .vars()
+            .ifs()
+            .chars()
+            .next()
+            .map_or(String::new(), |c| c.to_string());
         Some(sh.vars().positional.join(&sep))
     } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
         let flags = sh.shell_flags();
         let bg_pid = sh.last_bg_pid();
-        sh.vars().get_special(name, exit_status, pid, &flags, bg_pid)
+        sh.vars()
+            .get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
         sh.vars().get(name).map(String::from)
     };
@@ -378,10 +372,15 @@ fn expand_param_to_fragments(
     if raw_value.is_none()
         && !is_special_param(name)
         && sh.nounset()
-        && matches!(param.op,
-            ParamOp::Normal | ParamOp::Length
-            | ParamOp::TrimSuffixSmall(_) | ParamOp::TrimSuffixLarge(_)
-            | ParamOp::TrimPrefixSmall(_) | ParamOp::TrimPrefixLarge(_))
+        && matches!(
+            param.op,
+            ParamOp::Normal
+                | ParamOp::Length
+                | ParamOp::TrimSuffixSmall(_)
+                | ParamOp::TrimSuffixLarge(_)
+                | ParamOp::TrimPrefixSmall(_)
+                | ParamOp::TrimPrefixLarge(_)
+        )
     {
         return Err(ShellError::Runtime {
             msg: format!("{name}: parameter not set"),
@@ -392,12 +391,10 @@ fn expand_param_to_fragments(
     // For operators that use a word (default, assign, alternative, error),
     // expand the word to fragments to preserve quoting
     match &param.op {
-        ParamOp::BadSubst => {
-            Err(ShellError::Runtime {
-                msg: format!("{}: bad substitution", param.name),
-                span: param.span,
-            })
-        }
+        ParamOp::BadSubst => Err(ShellError::Runtime {
+            msg: format!("{}: bad substitution", param.name),
+            span: param.span,
+        }),
         ParamOp::Normal => {
             let value = raw_value.unwrap_or_default();
             Ok(vec![ExpandedWord {
@@ -507,23 +504,26 @@ fn expand_param_to_fragments(
 }
 
 /// Expand a parameter expression (returns flat string).
-fn expand_param(
-    param: &ParamExpr,
-    sh: &mut dyn ShellExpand,
-) -> crate::error::Result<String> {
+fn expand_param(param: &ParamExpr, sh: &mut dyn ShellExpand) -> crate::error::Result<String> {
     let name = &param.name;
 
     // Get the raw value
     // $* joins with first char of IFS (or nothing if IFS="")
     let raw_value = if name == "*" || name == "@" {
-        let sep = sh.vars().ifs().chars().next().map_or(String::new(), |c| c.to_string());
+        let sep = sh
+            .vars()
+            .ifs()
+            .chars()
+            .next()
+            .map_or(String::new(), |c| c.to_string());
         Some(sh.vars().positional.join(&sep))
     } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
         let flags = sh.shell_flags();
         let bg_pid = sh.last_bg_pid();
-        sh.vars().get_special(name, exit_status, pid, &flags, bg_pid)
+        sh.vars()
+            .get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
         sh.vars().get(name).map(String::from)
     };
@@ -532,10 +532,15 @@ fn expand_param(
     if raw_value.is_none()
         && !is_special_param(name)
         && sh.nounset()
-        && matches!(param.op,
-            ParamOp::Normal | ParamOp::Length
-            | ParamOp::TrimSuffixSmall(_) | ParamOp::TrimSuffixLarge(_)
-            | ParamOp::TrimPrefixSmall(_) | ParamOp::TrimPrefixLarge(_))
+        && matches!(
+            param.op,
+            ParamOp::Normal
+                | ParamOp::Length
+                | ParamOp::TrimSuffixSmall(_)
+                | ParamOp::TrimSuffixLarge(_)
+                | ParamOp::TrimPrefixSmall(_)
+                | ParamOp::TrimPrefixLarge(_)
+        )
     {
         return Err(ShellError::Runtime {
             msg: format!("{name}: parameter not set"),
@@ -544,12 +549,10 @@ fn expand_param(
     }
 
     match &param.op {
-        ParamOp::BadSubst => {
-            Err(ShellError::Runtime {
-                msg: format!("{}: bad substitution", param.name),
-                span: param.span,
-            })
-        }
+        ParamOp::BadSubst => Err(ShellError::Runtime {
+            msg: format!("{}: bad substitution", param.name),
+            span: param.span,
+        }),
         ParamOp::Normal => Ok(raw_value.unwrap_or_default()),
         ParamOp::Length => Ok(raw_value
             .as_ref()
@@ -638,10 +641,7 @@ fn expand_param(
 }
 
 /// Expand a parameter operation's word (the part after :-, :=, etc.)
-fn expand_param_word(
-    parts: &[WordPart],
-    sh: &mut dyn ShellExpand,
-) -> crate::error::Result<String> {
+fn expand_param_word(parts: &[WordPart], sh: &mut dyn ShellExpand) -> crate::error::Result<String> {
     let fragments = expand_word_parts(parts, sh, true)?;
     Ok(fragments.into_iter().map(|f| f.value).collect())
 }
@@ -825,7 +825,10 @@ mod tests {
 
     impl TestShell {
         fn new(vars: Variables) -> Self {
-            Self { vars, status: ExitStatus::SUCCESS }
+            Self {
+                vars,
+                status: ExitStatus::SUCCESS,
+            }
         }
 
         fn with_status(vars: Variables, status: ExitStatus) -> Self {
@@ -834,14 +837,30 @@ mod tests {
     }
 
     impl ShellExpand for TestShell {
-        fn vars(&self) -> &Variables { &self.vars }
-        fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
-        fn exit_status(&self) -> ExitStatus { self.status }
-        fn pid(&self) -> u32 { 1 }
-        fn cwd(&self) -> &Path { Path::new("/") }
-        fn shell_flags(&self) -> String { String::new() }
-        fn last_bg_pid(&self) -> Option<u32> { None }
-        fn nounset(&self) -> bool { false }
+        fn vars(&self) -> &Variables {
+            &self.vars
+        }
+        fn vars_mut(&mut self) -> &mut Variables {
+            &mut self.vars
+        }
+        fn exit_status(&self) -> ExitStatus {
+            self.status
+        }
+        fn pid(&self) -> u32 {
+            1
+        }
+        fn cwd(&self) -> &Path {
+            Path::new("/")
+        }
+        fn shell_flags(&self) -> String {
+            String::new()
+        }
+        fn last_bg_pid(&self) -> Option<u32> {
+            None
+        }
+        fn nounset(&self) -> bool {
+            false
+        }
         fn command_subst(&mut self, _cmd: &Command) -> crate::error::Result<String> {
             Ok(String::new())
         }
@@ -968,10 +987,7 @@ mod tests {
             },
             span: Span::default(),
         })]);
-        assert_eq!(
-            expand_word_to_fields(&word, &mut sh).unwrap(),
-            vec!["alt"]
-        );
+        assert_eq!(expand_word_to_fields(&word, &mut sh).unwrap(), vec!["alt"]);
     }
 
     #[test]
@@ -997,10 +1013,7 @@ mod tests {
             op: ParamOp::Length,
             span: Span::default(),
         })]);
-        assert_eq!(
-            expand_word_to_fields(&word, &mut sh).unwrap(),
-            vec!["5"]
-        );
+        assert_eq!(expand_word_to_fields(&word, &mut sh).unwrap(), vec!["5"]);
     }
 
     #[test]
@@ -1073,10 +1086,7 @@ mod tests {
     fn expand_single_quoted() {
         let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![WordPart::SingleQuoted("$FOO".into())]);
-        assert_eq!(
-            expand_word_to_fields(&word, &mut sh).unwrap(),
-            vec!["$FOO"]
-        );
+        assert_eq!(expand_word_to_fields(&word, &mut sh).unwrap(), vec!["$FOO"]);
     }
 
     #[test]
@@ -1146,9 +1156,6 @@ mod tests {
             op: ParamOp::Normal,
             span: Span::default(),
         })]);
-        assert_eq!(
-            expand_word_to_fields(&word, &mut sh).unwrap(),
-            vec!["42"]
-        );
+        assert_eq!(expand_word_to_fields(&word, &mut sh).unwrap(), vec!["42"]);
     }
 }

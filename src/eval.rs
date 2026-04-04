@@ -35,8 +35,7 @@ fn spawn_relay(
 fn is_pure_builtin(name: &str) -> bool {
     matches!(
         name,
-        "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type"
-            | "test" | "[" | "command"
+        "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type" | "test" | "[" | "command"
     )
 }
 use crate::error::{ExitStatus, ShellError, Span};
@@ -51,7 +50,8 @@ use crate::var::Variables;
 /// Receives expanded args (args[0] is the command name) and prefix assignment
 /// environment pairs. Redirections are already applied to fds before the
 /// handler is called. Return the exit status of the command.
-pub type ExternalHandler = Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus> + Send>;
+pub type ExternalHandler =
+    Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus> + Send>;
 
 /// A POSIX shell interpreter instance.
 ///
@@ -137,23 +137,47 @@ impl ShellOpts {
     /// Return the POSIX `$-` flags string (e.g. "eux").
     pub fn flags_string(&self) -> String {
         let mut s = String::new();
-        if self.errexit { s.push('e'); }
-        if self.nounset { s.push('u'); }
-        if self.xtrace { s.push('x'); }
-        if self.interactive { s.push('i'); }
+        if self.errexit {
+            s.push('e');
+        }
+        if self.nounset {
+            s.push('u');
+        }
+        if self.xtrace {
+            s.push('x');
+        }
+        if self.interactive {
+            s.push('i');
+        }
         s
     }
 }
 
 impl expand::ShellExpand for Shell {
-    fn vars(&self) -> &Variables { &self.vars }
-    fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
-    fn exit_status(&self) -> ExitStatus { self.exit_status }
-    fn pid(&self) -> u32 { self.pid }
-    fn cwd(&self) -> &Path { &self.cwd }
-    fn shell_flags(&self) -> String { self.opts.flags_string() }
-    fn last_bg_pid(&self) -> Option<u32> { self.last_bg_pid }
-    fn nounset(&self) -> bool { self.opts.nounset }
+    fn vars(&self) -> &Variables {
+        &self.vars
+    }
+    fn vars_mut(&mut self) -> &mut Variables {
+        &mut self.vars
+    }
+    fn exit_status(&self) -> ExitStatus {
+        self.exit_status
+    }
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+    fn shell_flags(&self) -> String {
+        self.opts.flags_string()
+    }
+    fn last_bg_pid(&self) -> Option<u32> {
+        self.last_bg_pid
+    }
+    fn nounset(&self) -> bool {
+        self.opts.nounset
+    }
     fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
         self.command_subst(cmd)
     }
@@ -179,7 +203,9 @@ pub struct ShellBuilder {
 }
 
 impl Default for ShellBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShellBuilder {
@@ -200,21 +226,57 @@ impl ShellBuilder {
         }
     }
 
-    pub fn cwd(mut self, path: PathBuf) -> Self { self.cwd = Some(path); self }
-    pub fn errexit(mut self, v: bool) -> Self { self.errexit = v; self }
-    pub fn nounset(mut self, v: bool) -> Self { self.nounset = v; self }
-    pub fn xtrace(mut self, v: bool) -> Self { self.xtrace = v; self }
-    pub fn pipefail(mut self, v: bool) -> Self { self.pipefail = v; self }
+    pub fn cwd(mut self, path: PathBuf) -> Self {
+        self.cwd = Some(path);
+        self
+    }
+    pub fn errexit(mut self, v: bool) -> Self {
+        self.errexit = v;
+        self
+    }
+    pub fn nounset(mut self, v: bool) -> Self {
+        self.nounset = v;
+        self
+    }
+    pub fn xtrace(mut self, v: bool) -> Self {
+        self.xtrace = v;
+        self
+    }
+    pub fn pipefail(mut self, v: bool) -> Self {
+        self.pipefail = v;
+        self
+    }
     /// Enable interactive mode (tcsetpgrp, WUNTRACED for job control).
-    pub fn interactive(mut self, v: bool) -> Self { self.interactive = v; self }
-    pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self { self.cancel = Some(flag); self }
-    pub fn stdout_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stdout_sink = Some(sink); self }
-    pub fn stderr_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self { self.stderr_sink = Some(sink); self }
-    pub fn timeout(mut self, duration: std::time::Duration) -> Self { self.timeout = Some(duration); self }
+    pub fn interactive(mut self, v: bool) -> Self {
+        self.interactive = v;
+        self
+    }
+    pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
+    }
+    pub fn stdout_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self {
+        self.stdout_sink = Some(sink);
+        self
+    }
+    pub fn stderr_sink(mut self, sink: Arc<Mutex<dyn Write + Send>>) -> Self {
+        self.stderr_sink = Some(sink);
+        self
+    }
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self {
+        self.timeout = Some(duration);
+        self
+    }
     /// Don't inherit process environment variables.
-    pub fn env_clear(mut self) -> Self { self.env_clear = true; self }
+    pub fn env_clear(mut self) -> Self {
+        self.env_clear = true;
+        self
+    }
     /// Set a callback for external command execution.
-    pub fn external_handler(mut self, handler: ExternalHandler) -> Self { self.external_handler = Some(handler); self }
+    pub fn external_handler(mut self, handler: ExternalHandler) -> Self {
+        self.external_handler = Some(handler);
+        self
+    }
 
     pub fn build(self) -> Shell {
         let vars = if self.env_clear {
@@ -222,7 +284,8 @@ impl ShellBuilder {
         } else {
             Variables::new()
         };
-        let cwd = self.cwd
+        let cwd = self
+            .cwd
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         Shell {
             vars,
@@ -302,23 +365,41 @@ impl Shell {
     }
 
     /// Variable storage.
-    pub fn vars(&self) -> &Variables { &self.vars }
+    pub fn vars(&self) -> &Variables {
+        &self.vars
+    }
     /// Mutable variable storage.
-    pub fn vars_mut(&mut self) -> &mut Variables { &mut self.vars }
+    pub fn vars_mut(&mut self) -> &mut Variables {
+        &mut self.vars
+    }
     /// Defined functions.
-    pub fn functions(&self) -> &HashMap<String, Command> { &self.functions }
+    pub fn functions(&self) -> &HashMap<String, Command> {
+        &self.functions
+    }
     /// Last command's exit status (`$?`).
-    pub fn exit_status(&self) -> ExitStatus { self.exit_status }
+    pub fn exit_status(&self) -> ExitStatus {
+        self.exit_status
+    }
     /// Shell's PID (`$$`).
-    pub fn pid(&self) -> u32 { self.pid }
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
     /// Current working directory.
-    pub fn cwd(&self) -> &Path { &self.cwd }
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
     /// Shell options.
-    pub fn opts(&self) -> &ShellOpts { &self.opts }
+    pub fn opts(&self) -> &ShellOpts {
+        &self.opts
+    }
     /// Mutable shell options.
-    pub fn opts_mut(&mut self) -> &mut ShellOpts { &mut self.opts }
+    pub fn opts_mut(&mut self) -> &mut ShellOpts {
+        &mut self.opts
+    }
     /// Trap handlers.
-    pub fn traps(&self) -> &HashMap<String, String> { &self.traps }
+    pub fn traps(&self) -> &HashMap<String, String> {
+        &self.traps
+    }
 
     /// Check cancellation flag and timeout deadline.
     fn check_cancel(&self) -> crate::error::Result<()> {
@@ -355,7 +436,9 @@ impl Shell {
             }
         } else {
             // SAFETY: fd 1 (stdout) is always valid; data pointer and length are from a live Vec.
-            unsafe { sys::write(1, data.as_ptr() as *const _, data.len()); }
+            unsafe {
+                sys::write(1, data.as_ptr() as *const _, data.len());
+            }
         }
     }
 
@@ -368,7 +451,9 @@ impl Shell {
             }
         } else {
             // SAFETY: fd 2 (stderr) is always valid; data pointer and length are from a live Vec.
-            unsafe { sys::write(2, data.as_ptr() as *const _, data.len()); }
+            unsafe {
+                sys::write(2, data.as_ptr() as *const _, data.len());
+            }
         }
     }
 
@@ -389,13 +474,19 @@ impl Shell {
     }
 
     fn wait_child_pgid(&mut self, pid: i32, pgid: i32) -> crate::error::Result<ExitStatus> {
-        let wuntraced = if self.opts.interactive { libc::WUNTRACED } else { 0 };
+        let wuntraced = if self.opts.interactive {
+            libc::WUNTRACED
+        } else {
+            0
+        };
 
         // If no cancel flag or timeout, just block
         if self.cancel.is_none() && self.timeout.is_none() {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            unsafe { sys::waitpid(pid, &mut status, wuntraced); }
+            unsafe {
+                sys::waitpid(pid, &mut status, wuntraced);
+            }
             if libc::WIFSTOPPED(status) {
                 // Don't remove from child_pids — process is still alive
                 return Err(ShellError::Stopped { pid, pgid });
@@ -409,7 +500,9 @@ impl Shell {
         std::thread::spawn(move || {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            unsafe { sys::waitpid(pid, &mut status, wuntraced); }
+            unsafe {
+                sys::waitpid(pid, &mut status, wuntraced);
+            }
             let _ = tx.send(status);
         });
         loop {
@@ -431,7 +524,9 @@ impl Shell {
             if let Err(e) = self.check_cancel() {
                 // Cancel or timeout — kill and reap
                 // SAFETY: pid is a valid child PID; negated for process group kill. SIGKILL is always valid.
-                unsafe { libc::kill(-pid, libc::SIGKILL); }
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
                 // The thread will complete waitpid and send the status; just drain it
                 let _ = rx.recv();
                 self.child_pids.retain(|&p| p != pid);
@@ -445,13 +540,17 @@ impl Shell {
         for &pid in &self.child_pids {
             // Kill the process group (negative PID)
             // SAFETY: pid is a valid child PID from fork(); negated for process group kill.
-            unsafe { libc::kill(-pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
         }
         // Reap them
         for &pid in &self.child_pids {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID; reaping after kill.
-            unsafe { sys::waitpid(pid, &mut status, 0); }
+            unsafe {
+                sys::waitpid(pid, &mut status, 0);
+            }
         }
         self.child_pids.clear();
     }
@@ -827,7 +926,7 @@ impl Shell {
                 for value in &word_list {
                     self.check_cancel()?;
                     if let Err(e) = self.vars.set(var, value) {
-                        self.err_msg(&format!("{e}"));
+                        self.err_msg(&e);
                         return Ok(ExitStatus::FAILURE);
                     }
                     match self.eval_command(body) {
@@ -913,7 +1012,9 @@ impl Shell {
                 let mut trace = self.xtrace_prefix();
                 for assign in assigns {
                     let value = self.expand_string(&assign.value)?;
-                    if !trace.ends_with(' ') { trace.push(' '); }
+                    if !trace.ends_with(' ') {
+                        trace.push(' ');
+                    }
                     trace.push_str(&assign.name);
                     trace.push('=');
                     trace.push_str(&value);
@@ -935,14 +1036,18 @@ impl Shell {
             let mut trace = self.xtrace_prefix();
             for assign in assigns {
                 if let Ok(value) = self.expand_string(&assign.value) {
-                    if !trace.ends_with(' ') { trace.push(' '); }
+                    if !trace.ends_with(' ') {
+                        trace.push(' ');
+                    }
                     trace.push_str(&assign.name);
                     trace.push('=');
                     trace.push_str(&value);
                 }
             }
             for arg in &expanded_args {
-                if !trace.ends_with(' ') { trace.push(' '); }
+                if !trace.ends_with(' ') {
+                    trace.push(' ');
+                }
                 trace.push_str(arg);
             }
             trace.push('\n');
@@ -981,7 +1086,9 @@ impl Shell {
             for s in saved_fds {
                 if let Some(copy) = s.saved_copy {
                     // SAFETY: copy is a valid fd from fcntl_dupfd_cloexec.
-                    unsafe { sys::close(copy); }
+                    unsafe {
+                        sys::close(copy);
+                    }
                 }
             }
         } else {
@@ -1000,10 +1107,7 @@ impl Shell {
         _span: Span,
     ) -> crate::error::Result<ExitStatus> {
         // Save and set positional parameters (take avoids clone)
-        let saved_positional = std::mem::replace(
-            &mut self.vars.positional,
-            args[1..].to_vec(),
-        );
+        let saved_positional = std::mem::replace(&mut self.vars.positional, args[1..].to_vec());
 
         // Push scope for local variables
         self.vars.push_scope();
@@ -1034,7 +1138,11 @@ impl Shell {
     }
 
     /// Handle exec/spawn failure — report error and return appropriate status.
-    fn handle_exec_error(&self, e: &std::io::Error, cmd_name: &str) -> crate::error::Result<ExitStatus> {
+    fn handle_exec_error(
+        &self,
+        e: &std::io::Error,
+        cmd_name: &str,
+    ) -> crate::error::Result<ExitStatus> {
         if e.kind() == std::io::ErrorKind::NotFound {
             self.err_msg(&format!("{cmd_name}: not found"));
             Ok(ExitStatus::NOT_FOUND)
@@ -1107,7 +1215,9 @@ impl Shell {
                 let child_id = child.id() as i32;
                 // Isolate in own process group from parent (allows posix_spawn path)
                 // SAFETY: child_id is a valid PID just returned by spawn().
-                unsafe { libc::setpgid(child_id, child_id); }
+                unsafe {
+                    libc::setpgid(child_id, child_id);
+                }
                 self.child_pids.push(child_id);
 
                 // Spawn relay threads for sinks, keeping handles to join later
@@ -1130,17 +1240,20 @@ impl Shell {
                             Ok(result) => break result,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                break Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other, "wait thread panicked"));
+                                break Err(std::io::Error::other("wait thread panicked"));
                             }
                         }
                         if let Err(e) = self.check_cancel() {
                             // Kill via PID since child was moved to the thread
                             // SAFETY: child_id is a valid PID from the spawned process.
-                            unsafe { libc::kill(child_id, libc::SIGKILL); }
+                            unsafe {
+                                libc::kill(child_id, libc::SIGKILL);
+                            }
                             let _ = rx.recv(); // wait for the thread to finish
                             self.child_pids.retain(|&p| p != child_id);
-                            for h in handles { let _ = h.join(); }
+                            for h in handles {
+                                let _ = h.join();
+                            }
                             self.restore_redirections(saved);
                             return Err(e);
                         }
@@ -1151,7 +1264,9 @@ impl Shell {
                 self.child_pids.retain(|&p| p != child_id);
 
                 // Join relay threads to ensure all output is flushed
-                for h in handles { let _ = h.join(); }
+                for h in handles {
+                    let _ = h.join();
+                }
 
                 match wait_result {
                     Ok(status) => Ok(ExitStatus::from(status.code().unwrap_or(128))),
@@ -1256,7 +1371,9 @@ impl Shell {
         // Interactive mode: give the pipeline the terminal
         if self.opts.interactive && pgid > 0 {
             // SAFETY: pgid is a valid process group from setpgid; fd 0 is stdin.
-            unsafe { libc::tcsetpgrp(0, pgid); }
+            unsafe {
+                libc::tcsetpgrp(0, pgid);
+            }
         }
 
         // Wait for all children, checking cancel between stages
@@ -1275,19 +1392,28 @@ impl Shell {
                 Err(ShellError::Stopped { pid: _, pgid: _ }) if self.opts.interactive => {
                     // Reclaim terminal before propagating
                     // SAFETY: getpgrp() and tcsetpgrp are always safe with valid fd.
-                    unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
-                    return Err(ShellError::Stopped { pid: children[children.len() - 1], pgid });
+                    unsafe {
+                        libc::tcsetpgrp(0, libc::getpgrp());
+                    }
+                    return Err(ShellError::Stopped {
+                        pid: children[children.len() - 1],
+                        pgid,
+                    });
                 }
                 Err(e @ (ShellError::Cancelled | ShellError::TimedOut)) => {
                     if self.opts.interactive {
-                        unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                        unsafe {
+                            libc::tcsetpgrp(0, libc::getpgrp());
+                        }
                     }
                     self.kill_children();
                     return Err(e);
                 }
                 Err(e) => {
                     if self.opts.interactive {
-                        unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                        unsafe {
+                            libc::tcsetpgrp(0, libc::getpgrp());
+                        }
                     }
                     return Err(e);
                 }
@@ -1297,7 +1423,9 @@ impl Shell {
         // Interactive mode: reclaim the terminal
         if self.opts.interactive && pgid > 0 {
             // SAFETY: getpgrp() returns our process group; fd 0 is stdin.
-            unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+            unsafe {
+                libc::tcsetpgrp(0, libc::getpgrp());
+            }
         }
 
         if self.opts.pipefail && !pipefail_status.success() {
@@ -1308,7 +1436,11 @@ impl Shell {
     }
 
     /// Execute a command in a subshell (fork).
-    fn eval_in_subshell(&mut self, body: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
+    fn eval_in_subshell(
+        &mut self,
+        body: &Command,
+        redirs: &[Redir],
+    ) -> crate::error::Result<ExitStatus> {
         // SAFETY: Standard POSIX fork pattern. Child isolates into its own
         // process group, executes the body, then _exit()s. Parent waits.
         unsafe {
@@ -1320,7 +1452,9 @@ impl Shell {
             if pid == 0 {
                 // Child — isolate in own process group
                 libc::setpgid(0, 0);
-                let parent_exit_trap = self.traps.remove("EXIT")
+                let parent_exit_trap = self
+                    .traps
+                    .remove("EXIT")
                     .or_else(|| self.traps.remove("exit"));
                 drop(parent_exit_trap); // parent EXIT trap doesn't run in subshell
                 self.in_forked_child = true;
@@ -1346,7 +1480,11 @@ impl Shell {
     }
 
     /// Execute a command in the background.
-    fn eval_background(&mut self, cmd: &Command, redirs: &[Redir]) -> crate::error::Result<ExitStatus> {
+    fn eval_background(
+        &mut self,
+        cmd: &Command,
+        redirs: &[Redir],
+    ) -> crate::error::Result<ExitStatus> {
         // SAFETY: Standard POSIX fork pattern. Child isolates into its own
         // process group and runs the command. Parent does not wait (background).
         unsafe {
@@ -1382,8 +1520,15 @@ impl Shell {
         // Pure builtins (echo, printf, true, false, :, pwd, type, test/[) don't
         // modify shell state, so running them in-process is safe and avoids the
         // fork+pipe+waitpid overhead entirely.
-        if let Command::Simple { assigns, args, redirs, span } = cmd
-            && assigns.is_empty() && redirs.is_empty() && !args.is_empty()
+        if let Command::Simple {
+            assigns,
+            args,
+            redirs,
+            span,
+        } = cmd
+            && assigns.is_empty()
+            && redirs.is_empty()
+            && !args.is_empty()
         {
             let mut expanded = Vec::new();
             let expand_ok = (|| -> crate::error::Result<()> {
@@ -1392,16 +1537,12 @@ impl Shell {
                 }
                 Ok(())
             })();
-            if expand_ok.is_ok() && !expanded.is_empty()
-                && is_pure_builtin(&expanded[0])
-            {
+            if expand_ok.is_ok() && !expanded.is_empty() && is_pure_builtin(&expanded[0]) {
                 // Capture output to buffer instead of forking
                 let saved_sink = self.stdout_sink.take();
                 let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
                 self.stdout_sink = Some(buf.clone());
-                let status = self.try_builtin(
-                    &expanded[0], &expanded, &[], &[], *span,
-                );
+                let status = self.try_builtin(&expanded[0], &expanded, &[], &[], *span);
                 self.stdout_sink = saved_sink;
                 if let Ok(Some(s)) = status {
                     self.exit_status = s;
@@ -1417,31 +1558,38 @@ impl Shell {
         }
 
         // $(<file) optimization: read file directly without forking
-        if let Command::Simple { assigns, args, redirs, .. } = cmd
-            && assigns.is_empty() && args.is_empty() && redirs.len() == 1
+        if let Command::Simple {
+            assigns,
+            args,
+            redirs,
+            ..
+        } = cmd
+            && assigns.is_empty()
+            && args.is_empty()
+            && redirs.len() == 1
             && let RedirKind::Input(ref word) = redirs[0].kind
         {
-                    let filename = self.expand_string(word)?;
-                    let filepath = self.resolve_path(&filename);
-                    match std::fs::read(&filepath) {
-                        Ok(bytes) => {
-                            let mut content = crate::encoding::bytes_to_str(&bytes);
-                            // Remove trailing newlines (like command substitution)
-                            while content.ends_with('\n') {
-                                content.pop();
-                            }
-                            self.exit_status = ExitStatus::SUCCESS;
-                            return Ok(content);
-                        }
-                        Err(e) => {
-                            self.err_msg(&format!("epsh: {filename}: {e}"));
-                            self.exit_status = ExitStatus::FAILURE;
-                            return Err(ShellError::Runtime {
-                                msg: format!("{filename}: {e}"),
-                                span: redirs[0].span,
-                            });
-                        }
+            let filename = self.expand_string(word)?;
+            let filepath = self.resolve_path(&filename);
+            match std::fs::read(&filepath) {
+                Ok(bytes) => {
+                    let mut content = crate::encoding::bytes_to_str(&bytes);
+                    // Remove trailing newlines (like command substitution)
+                    while content.ends_with('\n') {
+                        content.pop();
                     }
+                    self.exit_status = ExitStatus::SUCCESS;
+                    return Ok(content);
+                }
+                Err(e) => {
+                    self.err_msg(&format!("epsh: {filename}: {e}"));
+                    self.exit_status = ExitStatus::FAILURE;
+                    return Err(ShellError::Runtime {
+                        msg: format!("{filename}: {e}"),
+                        span: redirs[0].span,
+                    });
+                }
+            }
         }
 
         let mut fds = [0i32; 2];

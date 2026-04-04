@@ -499,7 +499,11 @@ impl Shell {
             }
         }
         // POSIX: return >0 if EOF was detected, even if data was read
-        if hit_eof { ExitStatus::FAILURE } else { ExitStatus::SUCCESS }
+        if hit_eof {
+            ExitStatus::FAILURE
+        } else {
+            ExitStatus::SUCCESS
+        }
     }
 
     fn builtin_local(&mut self, args: &[String]) -> ExitStatus {
@@ -541,10 +545,21 @@ impl Shell {
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
-                "-v" => { mode = Some('v'); i += 1; }
-                "-V" => { mode = Some('V'); i += 1; }
-                "-p" => { i += 1; } // -p: use default PATH (ignored for now)
-                "--" => { i += 1; break; }
+                "-v" => {
+                    mode = Some('v');
+                    i += 1;
+                }
+                "-V" => {
+                    mode = Some('V');
+                    i += 1;
+                }
+                "-p" => {
+                    i += 1;
+                } // -p: use default PATH (ignored for now)
+                "--" => {
+                    i += 1;
+                    break;
+                }
                 _ => break,
             }
         }
@@ -570,9 +585,7 @@ impl Shell {
                     }
                 } else {
                     // -v: terse — print path, or name for builtins/functions
-                    if self.functions.contains_key(name.as_str()) {
-                        self.write_out(&format!("{name}\n"));
-                    } else if is_builtin(name) {
+                    if self.functions.contains_key(name.as_str()) || is_builtin(name) {
                         self.write_out(&format!("{name}\n"));
                     } else if let Ok(path) = which(name) {
                         self.write_out(&format!("{path}\n"));
@@ -700,7 +713,10 @@ impl Shell {
                         return ExitStatus::SUCCESS;
                     }
                 }
-                self.err_msg(&format!("kill: {}: invalid signal specification", args[i + 1]));
+                self.err_msg(&format!(
+                    "kill: {}: invalid signal specification",
+                    args[i + 1]
+                ));
                 return ExitStatus::FAILURE;
             }
             // List all signals
@@ -911,162 +927,163 @@ impl Shell {
 
         // POSIX: reuse format string while arguments remain
         loop {
-        let mut i = 0;
-        let arg_start = arg_idx;
-        while i < fmt_chars.len() {
-            if fmt_chars[i] == '\\' {
-                i += 1;
-                if i < fmt_chars.len() {
-                    match fmt_chars[i] {
-                        'n' => out.push('\n'),
-                        't' => out.push('\t'),
-                        'r' => out.push('\r'),
-                        '\\' => out.push('\\'),
-                        '"' => out.push('"'),
-                        'a' => out.push('\x07'),
-                        'b' => out.push('\x08'),
-                        'f' => out.push('\x0c'),
-                        'v' => out.push('\x0b'),
-                        '0' => {
-                            i += 1;
-                            let start = i;
-                            while i < fmt_chars.len()
-                                && i < start + 3
-                                && matches!(fmt_chars[i], '0'..='7')
-                            {
+            let mut i = 0;
+            let arg_start = arg_idx;
+            while i < fmt_chars.len() {
+                if fmt_chars[i] == '\\' {
+                    i += 1;
+                    if i < fmt_chars.len() {
+                        match fmt_chars[i] {
+                            'n' => out.push('\n'),
+                            't' => out.push('\t'),
+                            'r' => out.push('\r'),
+                            '\\' => out.push('\\'),
+                            '"' => out.push('"'),
+                            'a' => out.push('\x07'),
+                            'b' => out.push('\x08'),
+                            'f' => out.push('\x0c'),
+                            'v' => out.push('\x0b'),
+                            '0' => {
                                 i += 1;
+                                let start = i;
+                                while i < fmt_chars.len()
+                                    && i < start + 3
+                                    && matches!(fmt_chars[i], '0'..='7')
+                                {
+                                    i += 1;
+                                }
+                                let oct: String = fmt_chars[start..i].iter().collect();
+                                let n = u8::from_str_radix(&oct, 8).unwrap_or(0);
+                                out.push(n as char);
+                                continue;
                             }
-                            let oct: String = fmt_chars[start..i].iter().collect();
-                            let n = u8::from_str_radix(&oct, 8).unwrap_or(0);
-                            out.push(n as char);
-                            continue;
+                            c => {
+                                out.push('\\');
+                                out.push(c);
+                            }
+                        }
+                        i += 1;
+                    } else {
+                        out.push('\\');
+                    }
+                } else if fmt_chars[i] == '%' {
+                    i += 1;
+                    if i >= fmt_chars.len() {
+                        out.push('%');
+                        break;
+                    }
+                    let mut flags = String::new();
+                    while i < fmt_chars.len() && matches!(fmt_chars[i], '-' | '+' | ' ' | '0' | '#')
+                    {
+                        flags.push(fmt_chars[i]);
+                        i += 1;
+                    }
+                    let mut width_s = String::new();
+                    while i < fmt_chars.len() && fmt_chars[i].is_ascii_digit() {
+                        width_s.push(fmt_chars[i]);
+                        i += 1;
+                    }
+                    let width: usize = width_s.parse().unwrap_or(0);
+                    let mut precision = None;
+                    if i < fmt_chars.len() && fmt_chars[i] == '.' {
+                        i += 1;
+                        let mut prec = String::new();
+                        while i < fmt_chars.len() && fmt_chars[i].is_ascii_digit() {
+                            prec.push(fmt_chars[i]);
+                            i += 1;
+                        }
+                        precision = Some(prec.parse::<usize>().unwrap_or(0));
+                    }
+                    if i >= fmt_chars.len() {
+                        break;
+                    }
+                    let conv = fmt_chars[i];
+                    i += 1;
+                    let left_align = flags.contains('-');
+                    let zero_pad = flags.contains('0') && !left_align;
+                    match conv {
+                        's' => {
+                            let val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
+                            arg_idx += 1;
+                            let val = if let Some(p) = precision {
+                                &val[..val.len().min(p)]
+                            } else {
+                                val
+                            };
+                            if left_align {
+                                let _ = write!(out, "{val:<width$}");
+                            } else {
+                                let _ = write!(out, "{val:>width$}");
+                            }
+                        }
+                        'd' | 'i' => {
+                            let val = args
+                                .get(arg_idx)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            arg_idx += 1;
+                            if zero_pad {
+                                let _ = write!(out, "{val:0>width$}");
+                            } else if left_align {
+                                let _ = write!(out, "{val:<width$}");
+                            } else {
+                                let _ = write!(out, "{val:>width$}");
+                            }
+                        }
+                        'o' => {
+                            let val = args
+                                .get(arg_idx)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            arg_idx += 1;
+                            let _ = write!(out, "{val:o}");
+                        }
+                        'x' => {
+                            let val = args
+                                .get(arg_idx)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            arg_idx += 1;
+                            let _ = write!(out, "{val:x}");
+                        }
+                        'X' => {
+                            let val = args
+                                .get(arg_idx)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            arg_idx += 1;
+                            let _ = write!(out, "{val:X}");
+                        }
+                        'c' => {
+                            let val = args
+                                .get(arg_idx)
+                                .and_then(|s| s.chars().next())
+                                .unwrap_or('\0');
+                            arg_idx += 1;
+                            if val != '\0' {
+                                out.push(val);
+                            }
+                        }
+                        '%' => out.push('%'),
+                        'b' => {
+                            let val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
+                            arg_idx += 1;
+                            out.push_str(&unescape_echo(val));
                         }
                         c => {
-                            out.push('\\');
+                            out.push('%');
                             out.push(c);
                         }
                     }
-                    i += 1;
                 } else {
-                    out.push('\\');
-                }
-            } else if fmt_chars[i] == '%' {
-                i += 1;
-                if i >= fmt_chars.len() {
-                    out.push('%');
-                    break;
-                }
-                let mut flags = String::new();
-                while i < fmt_chars.len() && matches!(fmt_chars[i], '-' | '+' | ' ' | '0' | '#') {
-                    flags.push(fmt_chars[i]);
+                    out.push(fmt_chars[i]);
                     i += 1;
                 }
-                let mut width_s = String::new();
-                while i < fmt_chars.len() && fmt_chars[i].is_ascii_digit() {
-                    width_s.push(fmt_chars[i]);
-                    i += 1;
-                }
-                let width: usize = width_s.parse().unwrap_or(0);
-                let mut precision = None;
-                if i < fmt_chars.len() && fmt_chars[i] == '.' {
-                    i += 1;
-                    let mut prec = String::new();
-                    while i < fmt_chars.len() && fmt_chars[i].is_ascii_digit() {
-                        prec.push(fmt_chars[i]);
-                        i += 1;
-                    }
-                    precision = Some(prec.parse::<usize>().unwrap_or(0));
-                }
-                if i >= fmt_chars.len() {
-                    break;
-                }
-                let conv = fmt_chars[i];
-                i += 1;
-                let left_align = flags.contains('-');
-                let zero_pad = flags.contains('0') && !left_align;
-                match conv {
-                    's' => {
-                        let val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
-                        arg_idx += 1;
-                        let val = if let Some(p) = precision {
-                            &val[..val.len().min(p)]
-                        } else {
-                            val
-                        };
-                        if left_align {
-                            let _ = write!(out, "{val:<width$}");
-                        } else {
-                            let _ = write!(out, "{val:>width$}");
-                        }
-                    }
-                    'd' | 'i' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        arg_idx += 1;
-                        if zero_pad {
-                            let _ = write!(out, "{val:0>width$}");
-                        } else if left_align {
-                            let _ = write!(out, "{val:<width$}");
-                        } else {
-                            let _ = write!(out, "{val:>width$}");
-                        }
-                    }
-                    'o' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        arg_idx += 1;
-                        let _ = write!(out, "{val:o}");
-                    }
-                    'x' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        arg_idx += 1;
-                        let _ = write!(out, "{val:x}");
-                    }
-                    'X' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        arg_idx += 1;
-                        let _ = write!(out, "{val:X}");
-                    }
-                    'c' => {
-                        let val = args
-                            .get(arg_idx)
-                            .and_then(|s| s.chars().next())
-                            .unwrap_or('\0');
-                        arg_idx += 1;
-                        if val != '\0' {
-                            out.push(val);
-                        }
-                    }
-                    '%' => out.push('%'),
-                    'b' => {
-                        let val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
-                        arg_idx += 1;
-                        out.push_str(&unescape_echo(val));
-                    }
-                    c => {
-                        out.push('%');
-                        out.push(c);
-                    }
-                }
-            } else {
-                out.push(fmt_chars[i]);
-                i += 1;
             }
-        }
-        // If format consumed no args, or no args remain, stop looping
-        if arg_idx == arg_start || arg_idx >= args.len() {
-            break;
-        }
+            // If format consumed no args, or no args remain, stop looping
+            if arg_idx == arg_start || arg_idx >= args.len() {
+                break;
+            }
         }
 
         self.write_out(&out);
@@ -1076,12 +1093,9 @@ impl Shell {
 
 /// All builtin command names recognized by the shell.
 pub const BUILTIN_NAMES: &[&str] = &[
-    ":", "true", "false", "echo", "printf",
-    "cd", "pwd", "exit", "return", "break", "continue",
-    "export", "readonly", "unset", "set", "shift",
-    "eval", ".", "source", "test", "[",
-    "read", "local", "exec", "command", "type",
-    "wait", "trap", "kill", "umask", "getopts",
+    ":", "true", "false", "echo", "printf", "cd", "pwd", "exit", "return", "break", "continue",
+    "export", "readonly", "unset", "set", "shift", "eval", ".", "source", "test", "[", "read",
+    "local", "exec", "command", "type", "wait", "trap", "kill", "umask", "getopts",
 ];
 
 /// Check if a command name is a shell builtin.
