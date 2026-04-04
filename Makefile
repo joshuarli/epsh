@@ -1,10 +1,9 @@
 .PHONY: test conformance bench
 
 test:
-	cargo test
+	cargo test --test-threads=4
 	cargo build
-	@perl check.pl -p ./target/debug/epsh -s check-epsh.t; \
-	if [ $$? -le 6 ]; then echo "mksh conformance: ok (6 known failures)"; else exit 1; fi
+	perl check.pl -p ./target/debug/epsh -s check-epsh.t
 
 conformance:
 	cargo build
