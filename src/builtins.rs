@@ -1157,7 +1157,7 @@ pub(crate) mod exec {
             Ok(v) => v,
             Err(_) => return std::io::Error::from_raw_os_error(libc::EINVAL),
         };
-        let c_argv: Vec<*const i8> = c_args
+        let c_argv: Vec<*const libc::c_char> = c_args
             .iter()
             .map(|a| a.as_ptr())
             .chain(std::iter::once(std::ptr::null()))
