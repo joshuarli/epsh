@@ -137,10 +137,27 @@ impl Shell {
                     let _ = (&write_end).write_all(&crate::encoding::str_to_bytes(&expanded));
                     drop(write_end);
 
-                    // SAFETY: read_fd is valid from pipe(); target_fd is the redirect target.
-                    unsafe {
-                        sys::dup2(read_fd, target_fd);
-                        sys::close(read_fd);
+                    // When sinks are active the shell is embedded in a multi-threaded
+                    // process. Calling dup2(read_fd, 0) in the parent would replace the
+                    // process-wide fd 0 and race with other threads reading stdin (e.g.
+                    // nerv's keyboard input loop). Instead, stash the read fd and let
+                    // eval_external pass it via cmd.stdin() after fork — only the child
+                    // inherits it. For builtins/functions that need stdin, the dup2 path
+                    // is still used since they run in-process on this thread.
+                    if target_fd == 0 && (self.stdout_sink.is_some() || self.stderr_sink.is_some()) {
+                        // Close any previously pending stdin (shouldn't happen in practice).
+                        if let Some(old) = self.pending_stdin.take() {
+                            // SAFETY: old is a valid fd we own.
+                            unsafe { sys::close(old); }
+                        }
+                        self.pending_stdin = Some(read_fd);
+                        // No SavedFd entry needed: we never touched fd 0.
+                    } else {
+                        // SAFETY: read_fd is valid from pipe(); target_fd is the redirect target.
+                        unsafe {
+                            sys::dup2(read_fd, target_fd);
+                            sys::close(read_fd);
+                        }
                     }
                 }
             }

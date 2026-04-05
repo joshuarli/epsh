@@ -116,6 +116,10 @@ pub struct Shell {
     external_handler: Option<ExternalHandler>,
     /// PID of the last background command ($!).
     last_bg_pid: Option<u32>,
+    /// Pending stdin fd for the next external command, set by setup_redirections
+    /// when a heredoc targets fd 0 in sink mode (avoids process-wide dup2 on fd 0
+    /// which would race with other threads reading stdin, e.g. nerv's input loop).
+    pub(crate) pending_stdin: Option<RawFd>,
 }
 
 /// Shell option flags (`set -e`, `set -u`, etc.).
@@ -341,6 +345,7 @@ impl ShellBuilder {
             timeout: self.timeout.map(|d| std::time::Instant::now() + d),
             external_handler: self.external_handler,
             last_bg_pid: None,
+            pending_stdin: None,
         }
     }
 }
@@ -378,6 +383,7 @@ impl Shell {
             timeout: None,
             external_handler: None,
             last_bg_pid: None,
+            pending_stdin: None,
         }
     }
 
@@ -1247,6 +1253,12 @@ impl Shell {
         if self.stderr_sink.is_some() {
             cmd.stderr(std::process::Stdio::piped());
         }
+        // Consume a pending heredoc stdin fd: setup_redirections stored this
+        // instead of dup2-ing onto fd 0 to avoid racing with the host's stdin reader.
+        if let Some(fd) = self.pending_stdin.take() {
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            cmd.stdin(file);
+        }
 
         let result = match cmd.spawn() {
             Ok(mut child) => {
@@ -1929,5 +1941,83 @@ mod tests {
         let mut shell = Shell::new();
         shell.run_script("trap 'echo caught' INT");
         assert!(shell.traps.contains_key("INT"));
+    }
+
+    // Regression test: heredoc stdin must not dup2 fd 0 in the parent process.
+    //
+    // When epsh runs on a background thread with stdout/stderr sinks (as nerv
+    // does), the old code did dup2(pipe_read_fd, 0) in the parent to set up
+    // heredoc stdin.  dup2 is process-wide, so between setup_redirections and
+    // restore_redirections the main thread's fd 0 pointed at the (soon-to-be-
+    // exhausted) pipe instead of the terminal.  The main thread read EOF and
+    // set should_quit, causing nerv to exit mid-session.
+    //
+    // The fix: when sinks are set, store the heredoc pipe read fd in
+    // Shell::pending_stdin and apply it via cmd.stdin() after fork so that
+    // the parent's fd 0 is never touched.
+    #[test]
+    fn heredoc_with_sinks_does_not_corrupt_fd0() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let corrupted = Arc::new(AtomicBool::new(false));
+        let corrupted_clone = corrupted.clone();
+
+        // Watcher thread: continuously polls fd 0 to detect corruption.
+        // fcntl(0, F_GETFD) returns -1 if fd 0 is closed/replaced with a pipe
+        // that has already been consumed.
+        let watcher = std::thread::spawn(move || {
+            for _ in 0..2000 {
+                let r = unsafe { libc::fcntl(0, libc::F_GETFD) };
+                if r == -1 {
+                    corrupted_clone.store(true, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        });
+
+        // Run 20 heredoc commands via sinks on a background thread, mirroring
+        // how nerv's epsh tool runs commands.
+        let worker = std::thread::spawn(move || {
+            for i in 0..20 {
+                let out: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+                let out2 = out.clone();
+                let script =
+                    format!("python3 - << 'PYEOF'\nprint('iter {i}')\nPYEOF");
+                let mut shell = Shell::builder()
+                    .stdout_sink(Arc::new(Mutex::new(
+                        crate::eval::tests::VecSink(out2),
+                    )))
+                    .stderr_sink(Arc::new(Mutex::new(std::io::sink())))
+                    .build();
+                let status = shell.run_script(&script);
+                assert_eq!(status, 0, "iter {i} failed");
+                let output =
+                    String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
+                assert!(
+                    output.contains(&format!("iter {i}")),
+                    "bad output at iter {i}: {output:?}"
+                );
+            }
+        });
+
+        worker.join().unwrap();
+        watcher.join().unwrap();
+
+        assert!(
+            !corrupted.load(Ordering::Relaxed),
+            "fd 0 was corrupted during heredoc execution (dup2 race)"
+        );
+    }
+
+    pub(super) struct VecSink(pub Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for VecSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }
