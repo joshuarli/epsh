@@ -1,39 +1,43 @@
 use std::io::Read;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut shell = epsh::eval::Shell::new();
 
     if args.len() > 1 {
         // Process options
         let mut i = 1;
         while i < args.len() {
-            if args[i] == "-c" {
+            let arg =
+                epsh::shell_bytes::ShellBytes::from_os_str(args[i].as_os_str()).to_shell_string();
+            if arg == "-c" {
                 // Execute command string
                 if i + 1 >= args.len() {
                     eprintln!("epsh: -c requires an argument");
                     std::process::exit(2);
                 }
-                let script = &args[i + 1];
+                let script = epsh::shell_bytes::ShellBytes::from_os_str(args[i + 1].as_os_str())
+                    .to_shell_string();
                 // Remaining args become $0, $1, ...
                 if i + 2 < args.len() {
-                    shell.set_args(
-                        &args[i + 2..]
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<&str>>(),
-                    );
+                    let shell_args: Vec<_> = args[i + 2..]
+                        .iter()
+                        .map(|s| epsh::shell_bytes::ShellBytes::from_os_str(s.as_os_str()))
+                        .collect();
+                    shell.set_args_bytes(&shell_args);
                 }
-                let status = shell.run_script(script);
+                let status = shell.run_script(&script);
                 std::process::exit(status);
-            } else if args[i] == "-s" {
+            } else if arg == "-s" {
                 // Read from stdin
                 break;
-            } else if (args[i] == "-o" || args[i] == "+o") && i + 1 < args.len() {
+            } else if (arg == "-o" || arg == "+o") && i + 1 < args.len() {
                 // Long options: -o pipefail, +o pipefail, etc.
-                let enable = args[i] == "-o";
+                let enable = arg == "-o";
                 i += 1;
-                match args[i].as_str() {
+                let opt = epsh::shell_bytes::ShellBytes::from_os_str(args[i].as_os_str())
+                    .to_shell_string();
+                match opt.as_str() {
                     "pipefail" => shell.opts_mut().pipefail = enable,
                     "errexit" => shell.opts_mut().errexit = enable,
                     "nounset" => shell.opts_mut().nounset = enable,
@@ -46,9 +50,9 @@ fn main() {
                     }
                 }
                 i += 1;
-            } else if args[i].starts_with('-') && args[i].len() > 1 {
+            } else if arg.starts_with('-') && arg.len() > 1 {
                 // Shell options like -e, -x, etc.
-                for ch in args[i][1..].chars() {
+                for ch in arg[1..].chars() {
                     match ch {
                         'e' => shell.opts_mut().errexit = true,
                         'u' => shell.opts_mut().nounset = true,
@@ -65,10 +69,17 @@ fn main() {
             } else {
                 // Script file
                 let filename = &args[i];
-                shell.set_args(&args[i..].iter().map(|s| s.as_str()).collect::<Vec<&str>>());
+                let shell_args: Vec<_> = args[i..]
+                    .iter()
+                    .map(|s| epsh::shell_bytes::ShellBytes::from_os_str(s.as_os_str()))
+                    .collect();
+                shell.set_args_bytes(&shell_args);
                 let content = match std::fs::read(filename) {
                     Ok(bytes) => epsh::encoding::bytes_to_str(&bytes),
                     Err(e) => {
+                        let filename =
+                            epsh::shell_bytes::ShellBytes::from_os_str(filename.as_os_str())
+                                .to_shell_string();
                         eprintln!("epsh: {filename}: {e}");
                         std::process::exit(127);
                     }

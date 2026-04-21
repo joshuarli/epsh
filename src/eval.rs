@@ -42,6 +42,7 @@ use crate::error::{ExitStatus, ShellError, Span};
 use crate::expand;
 use crate::glob;
 use crate::parser::Parser;
+use crate::shell_bytes::ShellBytes;
 use crate::sys;
 use crate::var::Variables;
 
@@ -50,8 +51,9 @@ use crate::var::Variables;
 /// Receives expanded args (args[0] is the command name) and prefix assignment
 /// environment pairs. Redirections are already applied to fds before the
 /// handler is called. Return the exit status of the command.
-pub type ExternalHandler =
-    Box<dyn FnMut(&[String], &[(String, String)]) -> crate::error::Result<ExitStatus> + Send>;
+pub type ExternalHandler = Box<
+    dyn FnMut(&[ShellBytes], &[(String, ShellBytes)]) -> crate::error::Result<ExitStatus> + Send,
+>;
 
 /// A POSIX shell interpreter instance.
 ///
@@ -592,7 +594,7 @@ impl Shell {
 
     /// Build the xtrace prefix string ($PS4, default "+ ").
     fn xtrace_prefix(&self) -> String {
-        self.vars.get("PS4").unwrap_or("+ ").to_string()
+        self.vars.get_shell("PS4").unwrap_or_else(|| "+ ".into())
     }
 
     /// Set a callback that replaces the default external command execution.
@@ -611,12 +613,25 @@ impl Shell {
         self.cwd = dir;
     }
 
+    /// Set shell arguments as raw shell bytes.
+    pub fn set_args_bytes(&mut self, args: &[ShellBytes]) {
+        if let Some(first) = args.first() {
+            self.vars.arg0 = first.clone();
+        }
+        self.vars.positional = args.iter().skip(1).cloned().collect();
+    }
+
     /// Resolve a path against the shell's working directory.
     /// Absolute paths are returned as-is; relative paths are joined with `self.cwd`.
     pub fn resolve_path(&self, p: &str) -> PathBuf {
-        let path = Path::new(p);
+        self.resolve_path_bytes(&ShellBytes::from_str_lossless(p))
+    }
+
+    /// Resolve a path against the shell's working directory from raw shell bytes.
+    pub fn resolve_path_bytes(&self, p: &ShellBytes) -> PathBuf {
+        let path = PathBuf::from(p.to_os_string());
         if path.is_absolute() {
-            path.to_path_buf()
+            path
         } else {
             self.cwd.join(path)
         }
@@ -707,10 +722,8 @@ impl Shell {
 
     /// Set shell arguments ($0, $1, $2, ...).
     pub fn set_args(&mut self, args: &[&str]) {
-        if let Some(first) = args.first() {
-            self.vars.arg0 = first.to_string();
-        }
-        self.vars.positional = args.iter().skip(1).map(|s| s.to_string()).collect();
+        let args: Vec<ShellBytes> = args.iter().map(|s| (*s).into()).collect();
+        self.set_args_bytes(&args);
     }
 
     /// Set a variable. Returns error if the variable is readonly.
@@ -718,9 +731,19 @@ impl Shell {
         self.vars.set(name, value)
     }
 
+    /// Set a variable from raw shell bytes.
+    pub fn set_var_bytes(&mut self, name: &str, value: ShellBytes) -> Result<(), String> {
+        self.vars.set_bytes(name, value)
+    }
+
     /// Get a variable's value.
     pub fn get_var(&self, name: &str) -> Option<&str> {
         self.vars.get(name)
+    }
+
+    /// Get a variable's raw bytes.
+    pub fn get_var_bytes(&self, name: &str) -> Option<&ShellBytes> {
+        self.vars.get_bytes(name)
     }
 
     /// Expand a word to a list of fields (with field splitting and globbing).
@@ -962,7 +985,7 @@ impl Shell {
                     expanded
                 } else {
                     // No 'in' clause: use positional parameters
-                    self.vars.positional.clone()
+                    self.vars.positional_shell_strings()
                 };
 
                 self.loop_depth += 1;
@@ -1117,10 +1140,12 @@ impl Shell {
                 let mut env_pairs = Vec::new();
                 for assign in assigns {
                     let value = self.expand_string(&assign.value)?;
-                    env_pairs.push((assign.name.clone(), value));
+                    env_pairs.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
                 }
+                let args_bytes: Vec<ShellBytes> =
+                    expanded_args.iter().cloned().map(Into::into).collect();
                 let handler = self.external_handler.as_mut().unwrap();
-                handler(&expanded_args, &env_pairs)
+                handler(&args_bytes, &env_pairs)
             } else {
                 self.eval_external(&expanded_args, assigns, &[], span)
             };
@@ -1151,7 +1176,10 @@ impl Shell {
         _span: Span,
     ) -> crate::error::Result<ExitStatus> {
         // Save and set positional parameters (take avoids clone)
-        let saved_positional = std::mem::replace(&mut self.vars.positional, args[1..].to_vec());
+        let saved_positional = std::mem::replace(
+            &mut self.vars.positional,
+            args[1..].iter().cloned().map(Into::into).collect(),
+        );
 
         // Push scope for local variables
         self.vars.push_scope();
@@ -1208,6 +1236,12 @@ impl Shell {
     ) -> crate::error::Result<ExitStatus> {
         self.check_cancel()?;
         let saved = self.setup_redirections(redirs)?;
+        let args_bytes: Vec<ShellBytes> = args.iter().cloned().map(Into::into).collect();
+        let mut assign_bytes = Vec::new();
+        for assign in assigns {
+            let value = self.expand_string(&assign.value)?;
+            assign_bytes.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
+        }
 
         // When ev_exit is set (pipeline child about to _exit), exec directly
         // instead of fork+exec. Mirrors dash's shellexec fast-path.
@@ -1215,35 +1249,29 @@ impl Shell {
             // SAFETY: ev_exit is only set in forked children (pipeline/subshell),
             // which are single-threaded. set_var/set_current_dir are safe here.
             unsafe {
-                for (k, v) in self.vars.exported_env() {
-                    std::env::set_var(&k, &v);
+                for (k, _) in std::env::vars_os() {
+                    std::env::remove_var(k);
                 }
-                for assign in assigns {
-                    if let Ok(value) = self.expand_string(&assign.value) {
-                        std::env::set_var(&assign.name, &value);
-                    }
+                for (k, v) in self.vars.env_for_command_os(&assign_bytes) {
+                    std::env::set_var(k, v);
                 }
                 let _ = std::env::set_current_dir(&self.cwd);
             }
-            let err = crate::builtins::exec::execvp(&args[0], args);
+            let err = crate::builtins::exec::execvp(&args_bytes[0], &args_bytes);
             self.restore_redirections(saved);
             return self.handle_exec_error(&err, &args[0]);
         }
 
-        let mut cmd = std::process::Command::new(&args[0]);
-        cmd.args(&args[1..]);
+        let mut cmd = std::process::Command::new(args_bytes[0].to_os_string());
+        cmd.args(args_bytes.iter().skip(1).map(ShellBytes::to_os_string));
         cmd.current_dir(&self.cwd);
         // NOTE: no pre_exec here — allows Rust to use posix_spawn (1.4x faster).
         // Process group isolation is done from parent after spawn via setpgid.
 
         // Set environment: exported vars + temporary assignments
         cmd.env_clear();
-        for (k, v) in self.vars.exported_env() {
-            cmd.env(&k, &v);
-        }
-        for assign in assigns {
-            let value = self.expand_string(&assign.value)?;
-            cmd.env(&assign.name, &value);
+        for (k, v) in self.vars.env_for_command_os(&assign_bytes) {
+            cmd.env(k, v);
         }
 
         // When sinks are set, capture child stdout/stderr and relay to sinks.
@@ -1620,7 +1648,7 @@ impl Shell {
             && let RedirKind::Input(ref word) = redirs[0].kind
         {
             let filename = self.expand_string(word)?;
-            let filepath = self.resolve_path(&filename);
+            let filepath = self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
             match std::fs::read(&filepath) {
                 Ok(bytes) => {
                     let mut content = crate::encoding::bytes_to_str(&bytes);
@@ -1982,18 +2010,14 @@ mod tests {
             for i in 0..20 {
                 let out: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
                 let out2 = out.clone();
-                let script =
-                    format!("python3 - << 'PYEOF'\nprint('iter {i}')\nPYEOF");
+                let script = format!("python3 - << 'PYEOF'\nprint('iter {i}')\nPYEOF");
                 let mut shell = Shell::builder()
-                    .stdout_sink(Arc::new(Mutex::new(
-                        crate::eval::tests::VecSink(out2),
-                    )))
+                    .stdout_sink(Arc::new(Mutex::new(crate::eval::tests::VecSink(out2))))
                     .stderr_sink(Arc::new(Mutex::new(std::io::sink())))
                     .build();
                 let status = shell.run_script(&script);
                 assert_eq!(status, 0, "iter {i} failed");
-                let output =
-                    String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
+                let output = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
                 assert!(
                     output.contains(&format!("iter {i}")),
                     "bad output at iter {i}: {output:?}"

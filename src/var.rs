@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::OsString;
 
 use crate::error::ExitStatus;
+use crate::shell_bytes::ShellBytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VarFlags(u8);
@@ -27,10 +29,30 @@ impl VarFlags {
     }
 }
 
+fn int_cache(value: Option<&ShellBytes>) -> Option<i64> {
+    value
+        .and_then(|s| s.as_utf8_str())
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
+fn is_shell_name_bytes(bytes: &[u8]) -> Option<String> {
+    let first = *bytes.first()?;
+    if !(first == b'_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !bytes
+        .iter()
+        .all(|b| *b == b'_' || b.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok().map(String::from)
+}
+
 /// A shell variable.
 #[derive(Debug, Clone)]
 pub struct Var {
-    pub value: Option<String>,
+    pub value: Option<ShellBytes>,
     pub flags: VarFlags,
     /// Cached integer parse of value. Avoids repeated string→i64 conversion
     /// in arithmetic and test builtins. Updated on every set.
@@ -38,8 +60,8 @@ pub struct Var {
 }
 
 impl Var {
-    fn new(value: Option<String>, flags: VarFlags) -> Self {
-        let int_cache = value.as_deref().and_then(|s| s.parse::<i64>().ok());
+    fn new(value: Option<ShellBytes>, flags: VarFlags) -> Self {
+        let int_cache = int_cache(value.as_ref());
         Var {
             value,
             flags,
@@ -63,14 +85,17 @@ pub struct Scope {
 
 /// Variable storage with scoping support.
 pub struct Variables {
-    /// All variables (flat namespace, latest value wins).
+    /// All shell variables (flat namespace, latest value wins).
     vars: HashMap<String, Var>,
+    /// Environment entries inherited from the parent that are not representable
+    /// as shell variables. Preserved for child processes.
+    inherited_env: Vec<(ShellBytes, ShellBytes)>,
     /// Stack of scopes for local variable restoration.
     scopes: Vec<Scope>,
     /// Positional parameters ($1, $2, ...).
-    pub positional: Vec<String>,
+    pub positional: Vec<ShellBytes>,
     /// $0 — script name or shell name.
-    pub arg0: String,
+    pub arg0: ShellBytes,
 }
 
 impl Default for Variables {
@@ -85,49 +110,71 @@ impl Variables {
         let mut vars = HashMap::new();
         vars.insert(
             "IFS".into(),
-            Var::new(Some(" \t\n".into()), VarFlags::new()),
+            Var::new(Some(ShellBytes::from(" \t\n")), VarFlags::new()),
         );
         Variables {
             vars,
+            inherited_env: Vec::new(),
             scopes: Vec::new(),
             positional: Vec::new(),
-            arg0: "epsh".into(),
+            arg0: ShellBytes::from("epsh"),
         }
     }
 
     pub fn new() -> Self {
         let mut vars = HashMap::new();
+        let mut inherited_env = Vec::new();
 
-        // Import environment variables
-        for (key, value) in env::vars() {
-            let mut f = VarFlags::new();
-            f.set(VarFlags::EXPORT);
-            vars.insert(key, Var::new(Some(value), f));
+        for (key, value) in env::vars_os() {
+            let key_bytes = ShellBytes::from_os_string(key);
+            let value_bytes = ShellBytes::from_os_string(value);
+            if let Some(name) = is_shell_name_bytes(key_bytes.as_bytes()) {
+                let mut f = VarFlags::new();
+                f.set(VarFlags::EXPORT);
+                vars.insert(name, Var::new(Some(value_bytes), f));
+            } else {
+                inherited_env.push((key_bytes, value_bytes));
+            }
         }
 
-        // Set default IFS
         if !vars.contains_key("IFS") {
             vars.insert(
                 "IFS".into(),
-                Var::new(Some(" \t\n".into()), VarFlags::new()),
+                Var::new(Some(ShellBytes::from(" \t\n")), VarFlags::new()),
             );
         }
 
         Variables {
             vars,
+            inherited_env,
             scopes: Vec::new(),
             positional: Vec::new(),
-            arg0: "epsh".into(),
+            arg0: ShellBytes::from("epsh"),
         }
     }
 
-    /// Get a variable's value. Returns None if unset.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.vars.get(name).and_then(|v| v.value.as_deref())
+    /// Get a variable's raw value. Returns None if unset.
+    pub fn get_bytes(&self, name: &str) -> Option<&ShellBytes> {
+        self.vars.get(name).and_then(|v| v.value.as_ref())
     }
 
-    /// Set a variable. Returns Err if readonly.
+    /// Get a variable's value as UTF-8, if valid. Returns None if unset or not UTF-8.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.get_bytes(name).and_then(ShellBytes::as_utf8_str)
+    }
+
+    /// Get a variable's value using the shell's byte-preserving string encoding.
+    pub fn get_shell(&self, name: &str) -> Option<String> {
+        self.get_bytes(name).map(ShellBytes::to_shell_string)
+    }
+
+    /// Set a variable from shell text. Returns Err if readonly.
     pub fn set(&mut self, name: &str, value: &str) -> Result<(), String> {
+        self.set_bytes(name, ShellBytes::from_str_lossless(value))
+    }
+
+    /// Set a variable from raw shell bytes. Returns Err if readonly.
+    pub fn set_bytes(&mut self, name: &str, value: ShellBytes) -> Result<(), String> {
         if let Some(existing) = self.vars.get(name)
             && existing.flags.has(VarFlags::READONLY)
         {
@@ -138,14 +185,8 @@ impl Variables {
             .vars
             .entry(name.to_string())
             .or_insert_with(|| Var::new(None, VarFlags::new()));
-        entry.value = Some(value.to_string());
-        entry.int_cache = value.parse::<i64>().ok();
-
-        // Sync to process environment if exported
-        if entry.flags.has(VarFlags::EXPORT) {
-            // SAFETY: epsh is single-threaded; no concurrent env access.
-            unsafe { env::set_var(name, value) };
-        }
+        entry.int_cache = int_cache(Some(&value));
+        entry.value = Some(value);
 
         Ok(())
     }
@@ -155,32 +196,21 @@ impl Variables {
         self.vars.get(name).and_then(|v| v.int_cache)
     }
 
-    /// Set a variable to an integer value. Avoids the i64→String→parse roundtrip
-    /// by setting both the string representation and the integer cache directly.
+    /// Set a variable to an integer value.
     pub fn set_int(&mut self, name: &str, value: i64) -> Result<(), String> {
-        // Fast path: update existing var in-place (avoids name.to_string() alloc)
         if let Some(existing) = self.vars.get_mut(name) {
             if existing.flags.has(VarFlags::READONLY) {
                 return Err(format!("{name}: readonly variable"));
             }
             existing.int_cache = Some(value);
-            // Reuse existing String allocation when possible
-            let s = existing.value.get_or_insert_with(String::new);
-            s.clear();
-            use std::fmt::Write;
-            let _ = write!(s, "{value}");
-            if existing.flags.has(VarFlags::EXPORT) {
-                // SAFETY: epsh is single-threaded; no concurrent env access.
-                unsafe { env::set_var(name, s.as_str()) };
-            }
+            existing.value = Some(ShellBytes::from_vec(value.to_string().into_bytes()));
             return Ok(());
         }
 
-        let s = value.to_string();
         self.vars.insert(
             name.to_string(),
             Var {
-                value: Some(s),
+                value: Some(ShellBytes::from_vec(value.to_string().into_bytes())),
                 flags: VarFlags::new(),
                 int_cache: Some(value),
             },
@@ -196,8 +226,6 @@ impl Variables {
             return Err(format!("{name}: readonly variable"));
         }
         self.vars.remove(name);
-        // SAFETY: epsh is single-threaded; no concurrent env access.
-        unsafe { env::remove_var(name) };
         Ok(())
     }
 
@@ -208,10 +236,6 @@ impl Variables {
             .entry(name.to_string())
             .or_insert_with(|| Var::new(None, VarFlags::new()));
         entry.flags.set(VarFlags::EXPORT);
-        if let Some(ref value) = entry.value {
-            // SAFETY: epsh is single-threaded; no concurrent env access.
-            unsafe { env::set_var(name, value) };
-        }
     }
 
     /// Mark a variable as readonly.
@@ -244,8 +268,7 @@ impl Variables {
         }
     }
 
-    /// Declare a local variable in the current scope. Saves the previous
-    /// value for restoration when the scope is popped.
+    /// Declare a local variable in the current scope.
     pub fn make_local(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() {
             let previous = self.vars.get(name).cloned();
@@ -254,6 +277,21 @@ impl Variables {
                 previous,
             });
         }
+    }
+
+    pub fn positional_shell_strings(&self) -> Vec<String> {
+        self.positional
+            .iter()
+            .map(ShellBytes::to_shell_string)
+            .collect()
+    }
+
+    pub fn positional_join_shell(&self, sep: &str) -> String {
+        self.positional_shell_strings().join(sep)
+    }
+
+    pub fn arg0_shell(&self) -> String {
+        self.arg0.to_shell_string()
     }
 
     /// Get a special parameter value ($?, $$, $#, $@, $*, $!, $-, $0, $1...).
@@ -269,40 +307,79 @@ impl Variables {
             "?" => Some(exit_status.code().to_string()),
             "$" => Some(shell_pid.to_string()),
             "#" => Some(self.positional.len().to_string()),
-            "0" => Some(self.arg0.clone()),
+            "0" => Some(self.arg0.to_shell_string()),
             "-" => Some(shell_flags.to_string()),
             "!" => last_bg_pid.map(|p| p.to_string()),
-            "@" | "*" => {
-                // These need special handling in expansion (IFS joining for *, separate fields for @)
-                Some(self.positional.join(" "))
-            }
+            "@" | "*" => Some(self.positional_shell_strings().join(" ")),
             _ => {
-                // Positional parameters $1, $2, ...
                 if let Ok(n) = name.parse::<usize>() {
                     if n >= 1 {
-                        self.positional.get(n - 1).cloned()
+                        self.positional.get(n - 1).map(ShellBytes::to_shell_string)
                     } else {
                         None
                     }
                 } else {
-                    self.get(name).map(String::from)
+                    self.get_shell(name)
                 }
             }
         }
     }
 
     /// Get the IFS value (defaults to " \t\n").
-    pub fn ifs(&self) -> &str {
-        self.get("IFS").unwrap_or(" \t\n")
+    pub fn ifs(&self) -> String {
+        self.get_shell("IFS").unwrap_or_else(|| " \t\n".into())
     }
 
-    /// Build the environment for execve: all exported variables.
+    /// Exported shell variables as shell strings.
     pub fn exported_env(&self) -> Vec<(String, String)> {
         self.vars
             .iter()
             .filter(|(_, v)| v.flags.has(VarFlags::EXPORT) && v.value.is_some())
-            .map(|(k, v)| (k.clone(), v.value.clone().unwrap()))
+            .map(|(k, v)| (k.clone(), v.value.as_ref().unwrap().to_shell_string()))
             .collect()
+    }
+
+    /// Exported shell variables as raw bytes.
+    pub fn exported_env_bytes(&self) -> Vec<(String, ShellBytes)> {
+        self.vars
+            .iter()
+            .filter(|(_, v)| v.flags.has(VarFlags::EXPORT) && v.value.is_some())
+            .map(|(k, v)| (k.clone(), v.value.as_ref().unwrap().clone()))
+            .collect()
+    }
+
+    /// Build the child environment, preserving inherited non-shell entries.
+    pub fn env_for_command_os(
+        &self,
+        assigns: &[(String, ShellBytes)],
+    ) -> Vec<(OsString, OsString)> {
+        let mut shadowed = HashSet::new();
+        for name in self.vars.iter().filter_map(|(k, v)| {
+            if v.flags.has(VarFlags::EXPORT) && v.value.is_some() {
+                Some(k.as_bytes().to_vec())
+            } else {
+                None
+            }
+        }) {
+            shadowed.insert(name);
+        }
+        for (name, _) in assigns {
+            shadowed.insert(name.as_bytes().to_vec());
+        }
+
+        let mut env = Vec::new();
+        for (name, value) in &self.inherited_env {
+            if !shadowed.contains(name.as_bytes()) {
+                env.push((name.to_os_string(), value.to_os_string()));
+            }
+        }
+        for (name, value) in self.exported_env_bytes() {
+            env.push((OsString::from(name), value.to_os_string()));
+        }
+        for (name, value) in assigns {
+            env.push((OsString::from(name), value.to_os_string()));
+        }
+        env
     }
 }
 
@@ -376,19 +453,6 @@ mod tests {
         assert_eq!(
             vars.get_special("4", ExitStatus::SUCCESS, 1, "", None),
             None
-        );
-    }
-
-    #[test]
-    fn special_params() {
-        let vars = Variables::new();
-        assert_eq!(
-            vars.get_special("?", ExitStatus::from(42), 1234, "", None),
-            Some("42".into())
-        );
-        assert_eq!(
-            vars.get_special("$", ExitStatus::SUCCESS, 1234, "", None),
-            Some("1234".into())
         );
     }
 

@@ -4,6 +4,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use crate::ast::*;
 use crate::error::ShellError;
 use crate::eval::Shell;
+use crate::shell_bytes::ShellBytes;
 
 use crate::sys;
 
@@ -23,22 +24,30 @@ impl Shell {
 
         for redir in redirs {
             let target_fd = redir.fd;
+            let preserve_fd = !(target_fd == 0
+                && matches!(
+                    redir.kind,
+                    RedirKind::HereDoc(_) | RedirKind::HereDocStrip(_)
+                )
+                && (self.stdout_sink.is_some() || self.stderr_sink.is_some()));
 
-            // Save the current fd
-            let saved_copy = {
-                let copy = sys::fcntl_dupfd_cloexec(target_fd, 10);
-                if copy >= 0 { Some(copy) } else { None }
-            };
+            if preserve_fd {
+                let saved_copy = {
+                    let copy = sys::fcntl_dupfd_cloexec(target_fd, 10);
+                    if copy >= 0 { Some(copy) } else { None }
+                };
 
-            saved.push(SavedFd {
-                target_fd,
-                saved_copy,
-            });
+                saved.push(SavedFd {
+                    target_fd,
+                    saved_copy,
+                });
+            }
 
             match &redir.kind {
                 RedirKind::Input(word) => {
                     let filename = self.expand_string(word)?;
-                    let filepath = self.resolve_path(&filename);
+                    let filepath =
+                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
                     let file = std::fs::File::open(&filepath).map_err(|e| {
                         self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
@@ -50,7 +59,8 @@ impl Shell {
                 }
                 RedirKind::Output(word) | RedirKind::Clobber(word) => {
                     let filename = self.expand_string(word)?;
-                    let filepath = self.resolve_path(&filename);
+                    let filepath =
+                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
                     let file = std::fs::File::create(&filepath).map_err(|e| {
                         self.err_msg(&format!("{filename}: {e}"));
                         ShellError::Io(e)
@@ -62,7 +72,8 @@ impl Shell {
                 }
                 RedirKind::Append(word) => {
                     let filename = self.expand_string(word)?;
-                    let filepath = self.resolve_path(&filename);
+                    let filepath =
+                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
                     let file = std::fs::OpenOptions::new()
                         .create(true)
                         .truncate(false)
@@ -79,7 +90,8 @@ impl Shell {
                 }
                 RedirKind::ReadWrite(word) => {
                     let filename = self.expand_string(word)?;
-                    let filepath = self.resolve_path(&filename);
+                    let filepath =
+                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
                     let file = std::fs::OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -131,10 +143,12 @@ impl Shell {
                                 parts: parts.clone(),
                                 span: redir.span,
                             };
-                            self.expand_string(&word)?
+                            crate::shell_bytes::ShellBytes::from_str_lossless(
+                                &self.expand_string(&word)?,
+                            )
                         }
                     };
-                    let _ = (&write_end).write_all(&crate::encoding::str_to_bytes(&expanded));
+                    let _ = (&write_end).write_all(expanded.as_bytes());
                     drop(write_end);
 
                     // When sinks are active the shell is embedded in a multi-threaded
@@ -144,11 +158,14 @@ impl Shell {
                     // eval_external pass it via cmd.stdin() after fork — only the child
                     // inherits it. For builtins/functions that need stdin, the dup2 path
                     // is still used since they run in-process on this thread.
-                    if target_fd == 0 && (self.stdout_sink.is_some() || self.stderr_sink.is_some()) {
+                    if target_fd == 0 && (self.stdout_sink.is_some() || self.stderr_sink.is_some())
+                    {
                         // Close any previously pending stdin (shouldn't happen in practice).
                         if let Some(old) = self.pending_stdin.take() {
                             // SAFETY: old is a valid fd we own.
-                            unsafe { sys::close(old); }
+                            unsafe {
+                                sys::close(old);
+                            }
                         }
                         self.pending_stdin = Some(read_fd);
                         // No SavedFd entry needed: we never touched fd 0.

@@ -1,5 +1,6 @@
 use crate::ast::{ParamExpr, ParamOp, WordPart};
 use crate::error::{ShellError, Span};
+use crate::shell_bytes::ShellBytes;
 
 /// Escape marker for backslash-escaped characters in unquoted context.
 /// Stored in Literal text so that fnmatch/glob can see escapes inside
@@ -94,7 +95,7 @@ impl Token {
 /// Pending here-document that needs its body read.
 #[derive(Debug)]
 pub struct PendingHereDoc {
-    pub delimiter: String,
+    pub delimiter: ShellBytes,
     pub strip_tabs: bool,
     pub quoted: bool,
 }
@@ -146,6 +147,10 @@ impl Lexer {
             recognize_reserved: true,
             pending_heredocs: Vec::new(),
         }
+    }
+
+    pub fn new_bytes(source: &[u8]) -> Self {
+        Self::new(&crate::encoding::bytes_to_str(source))
     }
 
     /// Return the current source position.
@@ -469,7 +474,7 @@ impl Lexer {
                     match ch {
                         '"' if !in_dquote => {
                             if !literal.is_empty() {
-                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                             }
                             self.advance(); // consume opening "
                             let inner = self.read_dquote_parts(span)?;
@@ -479,7 +484,7 @@ impl Lexer {
                         '"' if in_dquote && ctx == WordCtx::Brace => {
                             // Inner double quote inside "${...}" toggles context (dash's innerdq).
                             if !literal.is_empty() {
-                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                             }
                             self.advance(); // consume opening inner "
                             let inner = self.read_brace_dquote_toggle_parts(span)?;
@@ -488,7 +493,7 @@ impl Lexer {
                         // ('"' if in_dquote && ctx == Word is caught by termination above)
                         '\'' if !in_dquote => {
                             if !literal.is_empty() {
-                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                             }
                             self.advance_raw(); // consume opening '
                             let mut content = String::new();
@@ -505,7 +510,7 @@ impl Lexer {
                                 }
                             }
                             had_quoting = true;
-                            parts.push(WordPart::SingleQuoted(content));
+                            parts.push(WordPart::SingleQuoted(content.into()));
                         }
 
                         '\\' if in_dquote => {
@@ -546,7 +551,7 @@ impl Lexer {
 
                         '$' => {
                             if !literal.is_empty() {
-                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                             }
                             self.advance(); // consume $
                             if let Some(part) = self.read_dollar(in_dquote, span)? {
@@ -557,7 +562,7 @@ impl Lexer {
                         }
                         '`' => {
                             if !literal.is_empty() {
-                                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                                parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                             }
                             self.advance(); // consume opening `
                             let part = self.read_backtick_part(span)?;
@@ -582,7 +587,7 @@ impl Lexer {
                                 user.push(c);
                                 self.advance();
                             }
-                            parts.push(WordPart::Tilde(user));
+                            parts.push(WordPart::Tilde(user.into()));
                         }
 
                         _ => {
@@ -595,7 +600,7 @@ impl Lexer {
         }
 
         if !literal.is_empty() {
-            parts.push(WordPart::Literal(literal));
+            parts.push(WordPart::Literal(literal.into()));
         }
 
         Ok((coalesce_literals(parts), had_quoting))
@@ -928,7 +933,7 @@ impl Lexer {
                 Some('$') => {
                     self.advance();
                     if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                     }
                     if let Some(part) = self.read_dollar(false, span)? {
                         parts.push(part);
@@ -944,7 +949,7 @@ impl Lexer {
                 }
                 Some('`') => {
                     if !literal.is_empty() {
-                        parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                        parts.push(WordPart::Literal(std::mem::take(&mut literal).into()));
                     }
                     self.advance();
                     parts.push(self.read_backtick_part(span)?);
@@ -957,7 +962,7 @@ impl Lexer {
         }
 
         if !literal.is_empty() {
-            parts.push(WordPart::Literal(literal));
+            parts.push(WordPart::Literal(literal.into()));
         }
         Ok(parts)
     }
@@ -1411,7 +1416,7 @@ impl Lexer {
                 match self.advance_raw() {
                     None => {
                         // EOF before newline — check if this line IS the delimiter
-                        if line == heredoc.delimiter {
+                        if ShellBytes::from_str_lossless(&line) == heredoc.delimiter {
                             return Ok(body);
                         }
                         if !line.is_empty() {
@@ -1459,7 +1464,7 @@ impl Lexer {
                 }
             }
 
-            if line == heredoc.delimiter {
+            if ShellBytes::from_str_lossless(&line) == heredoc.delimiter {
                 return Ok(body);
             }
 
@@ -1507,7 +1512,7 @@ fn single_literal_text(parts: &[WordPart]) -> Option<&str> {
     if parts.len() == 1
         && let WordPart::Literal(s) = &parts[0]
     {
-        return Some(s);
+        return s.as_utf8_str();
     }
     None
 }
@@ -1516,6 +1521,7 @@ fn single_literal_text(parts: &[WordPart]) -> Option<&str> {
 /// Returns Some((name, value_parts)) if the first Literal starts with `name=`.
 fn try_split_assignment(parts: &[WordPart]) -> Option<(String, Vec<WordPart>)> {
     if let Some(WordPart::Literal(first)) = parts.first()
+        && let Some(first) = first.as_utf8_str()
         && let Some(eq_pos) = first.find('=')
     {
         let name = &first[..eq_pos];
@@ -1524,7 +1530,7 @@ fn try_split_assignment(parts: &[WordPart]) -> Option<(String, Vec<WordPart>)> {
             let rest_of_first = &first[eq_pos + 1..];
             let mut value_parts = Vec::new();
             if !rest_of_first.is_empty() {
-                value_parts.push(WordPart::Literal(rest_of_first.to_string()));
+                value_parts.push(WordPart::Literal(rest_of_first.to_string().into()));
             }
             for part in &parts[1..] {
                 value_parts.push(part.clone());
@@ -1545,7 +1551,8 @@ pub fn parts_to_text(parts: &[WordPart]) -> String {
         match part {
             WordPart::Literal(t) => {
                 // Strip CTLESC markers — they're escape metadata, not content
-                let mut chars = t.chars();
+                let text = t.to_shell_string();
+                let mut chars = text.chars();
                 while let Some(c) = chars.next() {
                     if c == CTLESC {
                         if let Some(next) = chars.next() {
@@ -1556,7 +1563,7 @@ pub fn parts_to_text(parts: &[WordPart]) -> String {
                     }
                 }
             }
-            WordPart::SingleQuoted(t) => s.push_str(t),
+            WordPart::SingleQuoted(t) => s.push_str(&t.to_shell_string()),
             WordPart::DoubleQuoted(inner) => {
                 s.push_str(&parts_to_text(inner));
             }
@@ -1567,7 +1574,7 @@ pub fn parts_to_text(parts: &[WordPart]) -> String {
             }
             WordPart::Tilde(user) => {
                 s.push('~');
-                s.push_str(user);
+                s.push_str(&user.to_shell_string());
             }
             _ => {} // CmdSubst, Backtick, Arith ignored
         }
@@ -1580,7 +1587,7 @@ pub fn parts_have_quoting(parts: &[WordPart]) -> bool {
     for part in parts {
         match part {
             WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_) => return true,
-            WordPart::Literal(s) if s.contains('\\') => return true,
+            WordPart::Literal(s) if s.to_shell_string().contains('\\') => return true,
             // Any non-Literal part indicates quoting/expansion happened
             WordPart::Param(_)
             | WordPart::CmdSubst(_)

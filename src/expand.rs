@@ -48,7 +48,7 @@ pub fn expand_word_to_fields(
     let fragments = expand_word_parts(&word.parts, sh, false)?;
 
     // Step 2: Field splitting on fragments marked split_fields=true
-    let ifs = sh.vars().ifs().to_string();
+    let ifs = sh.vars().ifs();
     let split = field_split(&fragments, &ifs);
 
     // Step 3: Pathname expansion (globbing) on results
@@ -86,11 +86,11 @@ pub fn expand_pattern(
         match part {
             WordPart::Literal(s) => {
                 // Unquoted literal — glob chars are active, CTLESC preserved
-                result.push_str(s);
+                result.push_str(&s.to_shell_string());
             }
             WordPart::SingleQuoted(s) => {
                 // Single-quoted — escape glob chars for fnmatch
-                for c in s.chars() {
+                for c in s.to_shell_string().chars() {
                     if matches!(c, '*' | '?' | '[' | ']' | '\\') {
                         result.push(CTLESC);
                     }
@@ -167,7 +167,7 @@ fn expand_word_parts_inner(
         match part {
             WordPart::Literal(s) => {
                 result.push(ExpandedWord {
-                    value: s.clone(),
+                    value: s.to_shell_string(),
                     // Literals from ${...} words are subject to field splitting
                     split_fields: in_param_word && !quoted_context,
                     word_break: false,
@@ -175,7 +175,7 @@ fn expand_word_parts_inner(
             }
             WordPart::SingleQuoted(s) => {
                 result.push(ExpandedWord {
-                    value: s.clone(),
+                    value: s.to_shell_string(),
                     split_fields: false,
                     word_break: false,
                 });
@@ -187,7 +187,7 @@ fn expand_word_parts_inner(
                 if has_at && inner.len() == 1 {
                     // "$@" — expand to separate fields
                     // First element merges with any preceding content in this word
-                    let positional = sh.vars().positional.clone();
+                    let positional = sh.vars().positional_shell_strings();
                     for (i, arg) in positional.iter().enumerate() {
                         result.push(ExpandedWord {
                             value: arg.clone(),
@@ -223,7 +223,7 @@ fn expand_word_parts_inner(
                     if sh.vars().positional.is_empty() {
                         // "$@" with no positional params produces nothing (not even empty string)
                     } else {
-                        let positional = sh.vars().positional.clone();
+                        let positional = sh.vars().positional_shell_strings();
                         let pos_len = positional.len();
                         for (i, arg) in positional.iter().enumerate() {
                             let mut val = String::new();
@@ -255,7 +255,7 @@ fn expand_word_parts_inner(
             WordPart::Param(param) => {
                 // $@ unquoted: expand to separate fields
                 if param.name == "@" && matches!(param.op, ParamOp::Normal) && !quoted_context {
-                    let positional = sh.vars().positional.clone();
+                    let positional = sh.vars().positional_shell_strings();
                     for (i, arg) in positional.iter().enumerate() {
                         result.push(ExpandedWord {
                             value: arg.clone(),
@@ -273,7 +273,7 @@ fn expand_word_parts_inner(
                         .chars()
                         .next()
                         .map_or(String::new(), |c| c.to_string());
-                    let value = sh.vars().positional.join(&sep);
+                    let value = sh.vars().positional_join_shell(&sep);
                     result.push(ExpandedWord {
                         value,
                         split_fields: false,
@@ -286,7 +286,7 @@ fn expand_word_parts_inner(
                     && matches!(param.op, ParamOp::Normal)
                     && !quoted_context
                 {
-                    let positional = sh.vars().positional.clone();
+                    let positional = sh.vars().positional_shell_strings();
                     for arg in &positional {
                         result.push(ExpandedWord {
                             value: arg.clone(),
@@ -300,7 +300,7 @@ fn expand_word_parts_inner(
                 }
             }
             WordPart::Tilde(user) => {
-                let expanded = expand_tilde(user);
+                let expanded = expand_tilde(user, sh);
                 result.push(ExpandedWord {
                     value: expanded,
                     split_fields: false,
@@ -358,7 +358,7 @@ fn expand_param_to_fragments(
             .chars()
             .next()
             .map_or(String::new(), |c| c.to_string());
-        Some(sh.vars().positional.join(&sep))
+        Some(sh.vars().positional_join_shell(&sep))
     } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
@@ -367,7 +367,7 @@ fn expand_param_to_fragments(
         sh.vars()
             .get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
-        sh.vars().get(name).map(String::from)
+        sh.vars().get_shell(name)
     };
 
     // set -u: error on unset variables (not special params, not ops that handle unset)
@@ -518,7 +518,7 @@ fn expand_param(param: &ParamExpr, sh: &mut dyn ShellExpand) -> crate::error::Re
             .chars()
             .next()
             .map_or(String::new(), |c| c.to_string());
-        Some(sh.vars().positional.join(&sep))
+        Some(sh.vars().positional_join_shell(&sep))
     } else if is_special_param(name) {
         let exit_status = sh.exit_status();
         let pid = sh.pid();
@@ -527,7 +527,7 @@ fn expand_param(param: &ParamExpr, sh: &mut dyn ShellExpand) -> crate::error::Re
         sh.vars()
             .get_special(name, exit_status, pid, &flags, bg_pid)
     } else {
-        sh.vars().get(name).map(String::from)
+        sh.vars().get_shell(name)
     };
 
     // set -u: error on unset variables (not special params, not ops that handle unset)
@@ -649,15 +649,14 @@ fn expand_param_word(parts: &[WordPart], sh: &mut dyn ShellExpand) -> crate::err
 }
 
 /// Tilde expansion: ~ → $HOME, ~user → user's home dir
-fn expand_tilde(user: &str) -> String {
+fn expand_tilde(user: &crate::shell_bytes::ShellBytes, sh: &dyn ShellExpand) -> String {
     if user.is_empty() {
-        // ~ → $HOME
-        std::env::var("HOME").unwrap_or_else(|_| "~".into())
+        sh.vars().get_shell("HOME").unwrap_or_else(|| "~".into())
     } else {
         // ~user → look up user's home directory
         // For stdlib-only, we can't easily do this without libc getpwnam.
         // Fall back to leaving it unexpanded.
-        format!("~{user}")
+        format!("~{}", user.to_shell_string())
     }
 }
 
@@ -1079,11 +1078,14 @@ mod tests {
     fn expand_tilde_home() {
         let mut sh = TestShell::new(make_vars());
         let word = make_word(vec![
-            WordPart::Tilde(String::new()),
+            WordPart::Tilde(String::new().into()),
             WordPart::Literal("/bin".into()),
         ]);
         let result = expand_word_to_string(&word, &mut sh).unwrap();
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var_os("HOME")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, format!("{home}/bin"));
     }
 

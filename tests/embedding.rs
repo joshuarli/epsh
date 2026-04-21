@@ -316,10 +316,11 @@ mod builtin_list {
 mod external_handler {
     use super::*;
     use epsh::eval::ExternalHandler;
+    use epsh::shell_bytes::ShellBytes;
 
     #[test]
     fn handler_receives_args() {
-        let captured_args = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let captured_args = Arc::new(Mutex::new(Vec::<Vec<ShellBytes>>::new()));
         let args_ref = captured_args.clone();
         let handler: ExternalHandler = Box::new(move |args, _env| {
             args_ref.lock().unwrap().push(args.to_vec());
@@ -329,12 +330,19 @@ mod external_handler {
         shell.run_program(&parse("nonexistent_cmd foo bar"));
         let calls = captured_args.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], vec!["nonexistent_cmd", "foo", "bar"]);
+        assert_eq!(
+            calls[0],
+            vec![
+                ShellBytes::from("nonexistent_cmd"),
+                ShellBytes::from("foo"),
+                ShellBytes::from("bar"),
+            ]
+        );
     }
 
     #[test]
     fn handler_receives_env_pairs() {
-        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, String)>>::new()));
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, ShellBytes)>>::new()));
         let env_ref = captured_env.clone();
         let handler: ExternalHandler = Box::new(move |_args, env| {
             env_ref.lock().unwrap().push(env.to_vec());
@@ -344,8 +352,8 @@ mod external_handler {
         shell.run_program(&parse("FOO=bar BAZ=qux mycmd"));
         let calls = captured_env.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].contains(&("FOO".into(), "bar".into())));
-        assert!(calls[0].contains(&("BAZ".into(), "qux".into())));
+        assert!(calls[0].contains(&("FOO".into(), ShellBytes::from("bar"))));
+        assert!(calls[0].contains(&("BAZ".into(), ShellBytes::from("qux"))));
     }
 
     #[test]

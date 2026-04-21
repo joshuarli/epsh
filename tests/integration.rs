@@ -1523,3 +1523,375 @@ mod noexec {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     }
 }
+
+mod raw_bytes {
+    use super::*;
+    use epsh::encoding;
+    use epsh::shell_bytes::ShellBytes;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::symlink;
+    use tempfile::tempdir;
+
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\"'\"'"))
+    }
+
+    fn shell_os(s: &str) -> OsString {
+        OsString::from_vec(encoding::str_to_bytes(s))
+    }
+
+    fn raw_path(dir: &Path, tail: &[u8]) -> std::path::PathBuf {
+        let mut bytes = dir.as_os_str().as_bytes().to_vec();
+        if !bytes.ends_with(b"/") {
+            bytes.push(b'/');
+        }
+        bytes.extend_from_slice(tail);
+        std::path::PathBuf::from(OsString::from_vec(bytes))
+    }
+
+    fn shell_path(path: &Path) -> String {
+        ShellBytes::from_os_str(path.as_os_str()).to_shell_string()
+    }
+
+    fn run_script_os(
+        dir: &Path,
+        script: &str,
+        envs: &[(OsString, OsString)],
+    ) -> std::process::Output {
+        let mut cmd = epsh();
+        cmd.current_dir(dir).arg("-c").arg(shell_os(script));
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("failed to execute epsh")
+    }
+
+    fn run_file_os(
+        dir: &Path,
+        script_path: &Path,
+        envs: &[(OsString, OsString)],
+    ) -> std::process::Output {
+        let mut cmd = epsh();
+        cmd.current_dir(dir).arg(script_path.as_os_str());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("failed to execute epsh")
+    }
+
+    fn helper_paths() -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        (
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_show_argv")),
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_show_env")),
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_emit_hex")),
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_stat_path")),
+        )
+    }
+
+    fn raw_paths_supported(dir: &Path) -> bool {
+        let probe = raw_path(dir, b"probe-\x80");
+        match fs::write(&probe, "x") {
+            Ok(()) => {
+                let _ = fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn argv_bytes_round_trip_to_child() {
+        let tmp = tempdir().unwrap();
+        let (show_argv, _, _, _) = helper_paths();
+        let raw = vec![b'a', 0x80, 0xff, b'b'];
+        let arg = encoding::bytes_to_str(&raw);
+        let script = format!(
+            "{} {}",
+            shell_quote(&shell_path(&show_argv)),
+            shell_quote(&arg)
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "6180ff62\n");
+    }
+
+    #[test]
+    fn exported_env_bytes_round_trip_to_child() {
+        let tmp = tempdir().unwrap();
+        let (_, show_env, _, _) = helper_paths();
+        let raw = vec![b'x', 0x80, 0xff, b'y'];
+        let value = encoding::bytes_to_str(&raw);
+        let script = format!(
+            "X={}; export X; {} X",
+            shell_quote(&value),
+            shell_quote(&shell_path(&show_env))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "7880ff79\n");
+    }
+
+    #[test]
+    fn prefix_assignment_env_bytes_round_trip_to_child() {
+        let tmp = tempdir().unwrap();
+        let (_, show_env, _, _) = helper_paths();
+        let raw = vec![b'p', 0x80, 0xff, b'q'];
+        let value = encoding::bytes_to_str(&raw);
+        let script = format!(
+            "X={} {} X",
+            shell_quote(&value),
+            shell_quote(&shell_path(&show_env))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "7080ff71\n");
+    }
+
+    #[test]
+    fn inherited_env_bytes_round_trip_to_child() {
+        let tmp = tempdir().unwrap();
+        let (_, show_env, _, _) = helper_paths();
+        let out = run_script_os(
+            tmp.path(),
+            &format!("{} X", shell_quote(&shell_path(&show_env))),
+            &[(
+                OsString::from("X"),
+                OsString::from_vec(vec![b'a', 0x80, 0xff, b'b']),
+            )],
+        );
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "6180ff62\n");
+    }
+
+    #[test]
+    fn variable_expansion_to_argv_preserves_invalid_utf8_bytes() {
+        let tmp = tempdir().unwrap();
+        let (show_argv, _, _, _) = helper_paths();
+        let raw = vec![b'v', 0x80, 0xff, b'w'];
+        let value = encoding::bytes_to_str(&raw);
+        let script = format!(
+            "X={}; {} \"$X\"",
+            shell_quote(&value),
+            shell_quote(&shell_path(&show_argv))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "7680ff77\n");
+    }
+
+    #[test]
+    fn script_path_with_invalid_utf8_runs() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let script_path = raw_path(tmp.path(), b"script-\x80.sh");
+        fs::write(&script_path, "echo ok\n").unwrap();
+        let out = run_file_os(tmp.path(), &script_path, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "ok\n");
+    }
+
+    #[test]
+    fn output_redirection_to_invalid_utf8_path() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let target = raw_path(tmp.path(), b"out-\x80.txt");
+        let script = format!("printf hi > {}", shell_quote(&shell_path(&target)));
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(fs::read(&target).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn input_redirection_from_invalid_utf8_path() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let target = raw_path(tmp.path(), b"in-\x80.txt");
+        fs::write(&target, "hello\n").unwrap();
+        let script = format!("read x < {}; echo $x", shell_quote(&shell_path(&target)));
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn cd_into_invalid_utf8_directory_and_use_relative_path() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let dir = raw_path(tmp.path(), b"dir-\x80");
+        fs::create_dir(&dir).unwrap();
+        let script = format!(
+            "cd {}; pwd; printf ok > child.txt",
+            shell_quote(&shell_path(&dir))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!(
+                "{}\n",
+                ShellBytes::from_os_str(dir.as_os_str()).to_shell_string()
+            )
+        );
+        assert_eq!(fs::read(dir.join("child.txt")).unwrap(), b"ok");
+    }
+
+    #[test]
+    fn test_builtin_handles_invalid_utf8_paths() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let file = raw_path(tmp.path(), b"file-\x80");
+        let dir = raw_path(tmp.path(), b"dir-\x81");
+        let link = raw_path(tmp.path(), b"link-\x82");
+        fs::write(&file, "x").unwrap();
+        fs::create_dir(&dir).unwrap();
+        symlink(&file, &link).unwrap();
+        let script = format!(
+            "test -e {} && test -f {} && test -d {} && test -L {} && echo ok",
+            shell_quote(&shell_path(&file)),
+            shell_quote(&shell_path(&file)),
+            shell_quote(&shell_path(&dir)),
+            shell_quote(&shell_path(&link))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "ok\n");
+    }
+
+    #[test]
+    fn dot_builtin_handles_invalid_utf8_paths() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let script_path = raw_path(tmp.path(), b"source-\x80.sh");
+        fs::write(&script_path, "echo sourced\n").unwrap();
+        let script = format!(". {}", shell_quote(&shell_path(&script_path)));
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "sourced\n");
+    }
+
+    #[test]
+    fn path_lookup_handles_invalid_utf8_directories() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let dir = raw_path(tmp.path(), b"path-\x80");
+        fs::create_dir(&dir).unwrap();
+        let tool = dir.join("tool");
+        fs::copy(env!("CARGO_BIN_EXE_show_argv"), &tool).unwrap();
+        let out = run_script_os(
+            tmp.path(),
+            "type tool >/dev/null && command -v tool >/dev/null && tool >/dev/null && echo path-ok",
+            &[(OsString::from("PATH"), dir.as_os_str().to_os_string())],
+        );
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "path-ok\n");
+    }
+
+    #[test]
+    fn glob_matches_invalid_utf8_filenames() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let first = raw_path(tmp.path(), b"match-a-\x80.txt");
+        let second = raw_path(tmp.path(), b"match-b-\x81.txt");
+        let miss = raw_path(tmp.path(), b"miss-\x82.bin");
+        fs::write(&first, "x").unwrap();
+        fs::write(&second, "y").unwrap();
+        fs::write(&miss, "z").unwrap();
+        let out = run_script_os(
+            tmp.path(),
+            "set -- match-*.txt; printf '%s\\n' \"$1\" \"$2\"",
+            &[],
+        );
+        assert_eq!(out.status.code().unwrap(), 0);
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(
+            stdout,
+            format!(
+                "{}\n{}\n",
+                encoding::bytes_to_str(b"match-a-\x80.txt"),
+                encoding::bytes_to_str(b"match-b-\x81.txt")
+            )
+        );
+        assert!(!stdout.contains("miss-"));
+    }
+
+    #[test]
+    fn command_subst_preserves_invalid_utf8_bytes() {
+        let tmp = tempdir().unwrap();
+        let (show_argv, _, emit, _) = helper_paths();
+        let script = format!(
+            "{} \"$({} 61ff62)\"",
+            shell_quote(&shell_path(&show_argv)),
+            shell_quote(&shell_path(&emit))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "61ff62\n");
+    }
+
+    #[test]
+    fn variable_expansion_to_redirection_target_preserves_invalid_utf8_bytes() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let target = raw_path(tmp.path(), b"redir-\x80.txt");
+        let script = format!(
+            "F={}; printf hi > \"$F\"",
+            shell_quote(&shell_path(&target))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        assert_eq!(fs::read(&target).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn variable_expansion_to_path_argument_preserves_invalid_utf8_bytes() {
+        let tmp = tempdir().unwrap();
+        if !raw_paths_supported(tmp.path()) {
+            return;
+        }
+        let (_, _, _, stat_path) = helper_paths();
+        let target = raw_path(tmp.path(), b"arg-path-\x80");
+        fs::write(&target, "x").unwrap();
+        let script = format!(
+            "P={}; {} \"$P\"",
+            shell_quote(&shell_path(&target)),
+            shell_quote(&shell_path(&stat_path))
+        );
+        let out = run_script_os(tmp.path(), &script, &[]);
+        assert_eq!(out.status.code().unwrap(), 0);
+        let expected_hex = target
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("path={expected_hex}\nexists=1\nkind=file\n")
+        );
+    }
+}

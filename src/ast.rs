@@ -1,4 +1,5 @@
 use crate::error::Span;
+use crate::shell_bytes::ShellBytes;
 
 /// A complete shell program: a list of complete commands separated by
 /// newlines or semicolons.
@@ -118,9 +119,9 @@ pub struct Word {
 #[derive(Debug, Clone)]
 pub enum WordPart {
     /// Unquoted literal text
-    Literal(String),
+    Literal(ShellBytes),
     /// Single-quoted string (no expansion)
-    SingleQuoted(String),
+    SingleQuoted(ShellBytes),
     /// Double-quoted region (expansions apply, but no field splitting or globbing)
     DoubleQuoted(Vec<WordPart>),
     /// Parameter/variable expansion: `$var`, `${var}`, `${var:-default}`, `${#var}`, etc.
@@ -132,7 +133,7 @@ pub enum WordPart {
     /// Arithmetic expansion: `$((expression))`
     Arith(Vec<WordPart>),
     /// Tilde prefix: `~` or `~user`
-    Tilde(String),
+    Tilde(ShellBytes),
 }
 
 /// Parameter expansion expression.
@@ -185,7 +186,7 @@ pub struct Redir {
 #[derive(Debug, Clone)]
 pub enum HereDocBody {
     /// Quoted heredoc (<<'EOF') — no expansion, literal text
-    Literal(String),
+    Literal(ShellBytes),
     /// Unquoted heredoc (<<EOF) — contains expandable word parts
     Parsed(Vec<WordPart>),
 }

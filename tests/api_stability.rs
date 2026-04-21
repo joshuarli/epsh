@@ -20,6 +20,7 @@ use epsh::expand;
 use epsh::glob;
 use epsh::lexer;
 use epsh::parser;
+use epsh::shell_bytes;
 use epsh::var;
 
 #[test]
@@ -293,12 +294,12 @@ fn variables_api() {
 
     // special
     let _: Option<String> = vars.get_special("?", error::ExitStatus::SUCCESS, 1, "", None);
-    let _: &str = vars.ifs();
+    let _: String = vars.ifs();
     let _: Vec<(String, String)> = vars.exported_env();
 
     // positional
     vars.positional = vec!["a".into()];
-    let _: &str = &vars.arg0;
+    let _: &shell_bytes::ShellBytes = &vars.arg0;
 }
 
 #[test]

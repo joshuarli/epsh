@@ -51,6 +51,8 @@ pub mod lexer;
 /// Recursive-descent parser producing [`ast::Program`].
 pub mod parser;
 mod redirect;
+/// Byte-preserving shell runtime values and OS/libc conversion helpers.
+pub mod shell_bytes;
 pub(crate) mod signal;
 pub(crate) mod sys;
 mod test_cmd;

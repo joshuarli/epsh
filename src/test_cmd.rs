@@ -1,4 +1,5 @@
 use crate::error::ExitStatus;
+use crate::shell_bytes::ShellBytes;
 use crate::sys;
 
 /// Full POSIX test/[ implementation with compound expressions.
@@ -134,8 +135,8 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
                     *pos += 1;
                     ""
                 };
-                let lm = std::fs::metadata(left).ok();
-                let rm = std::fs::metadata(right).ok();
+                let lm = std::fs::metadata(ShellBytes::from_str_lossless(left).to_path_buf()).ok();
+                let rm = std::fs::metadata(ShellBytes::from_str_lossless(right).to_path_buf()).ok();
                 return match maybe_op {
                     "-nt" => match (lm, rm) {
                         (Some(l), Some(r)) => l.modified().ok() > r.modified().ok(),
@@ -196,7 +197,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
             } else {
                 ""
             };
-            std::path::Path::new(p).exists()
+            ShellBytes::from_str_lossless(p).to_path_buf().exists()
         }
         "-f" if has_operand => {
             *pos += 1;
@@ -207,7 +208,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
             } else {
                 ""
             };
-            std::path::Path::new(p).is_file()
+            ShellBytes::from_str_lossless(p).to_path_buf().is_file()
         }
         "-d" if has_operand => {
             *pos += 1;
@@ -218,7 +219,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
             } else {
                 ""
             };
-            std::path::Path::new(p).is_dir()
+            ShellBytes::from_str_lossless(p).to_path_buf().is_dir()
         }
         "-L" | "-h" if has_operand => {
             *pos += 1;
@@ -229,7 +230,8 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
             } else {
                 ""
             };
-            std::path::Path::new(p)
+            ShellBytes::from_str_lossless(p)
+                .to_path_buf()
                 .symlink_metadata()
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
@@ -245,7 +247,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
             };
             use std::os::unix::fs::MetadataExt;
             let uid = unsafe { sys::getuid() };
-            match std::fs::metadata(p) {
+            match std::fs::metadata(ShellBytes::from_str_lossless(p).to_path_buf()) {
                 Ok(m) => {
                     let mode = m.mode();
                     let is_owner = m.uid() == uid;

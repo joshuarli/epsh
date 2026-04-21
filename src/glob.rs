@@ -1,47 +1,49 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use std::os::unix::ffi::OsStrExt;
+
+use crate::shell_bytes::ShellBytes;
+
 /// Expand a glob pattern into matching filenames.
 /// Returns sorted matches, or empty vec if no matches.
 /// `cwd` is the working directory for resolving relative patterns.
 pub fn glob(pattern: &str, cwd: &Path) -> Vec<String> {
-    let mut results = Vec::new();
-
+    let pattern = ShellBytes::from_str_lossless(pattern);
     if pattern.is_empty() {
-        return results;
+        return Vec::new();
     }
 
-    // Split pattern into directory prefix and the rest
-    let path = Path::new(pattern);
-    let mut components: Vec<&str> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => components.push("/"),
-            std::path::Component::Normal(s) => components.push(s.to_str().unwrap_or("")),
-            std::path::Component::CurDir => components.push("."),
-            std::path::Component::ParentDir => components.push(".."),
-            _ => {}
-        }
+    let (absolute, components) = split_components(pattern.as_bytes());
+    if absolute && components.is_empty() {
+        return vec!["/".into()];
     }
-
     if components.is_empty() {
-        return results;
+        return Vec::new();
     }
 
-    // Start matching from the first component
-    if components[0] == "/" {
+    let mut results = Vec::new();
+    if absolute {
         glob_recursive(
             &PathBuf::from("/"),
             &PathBuf::from("/"),
-            &components[1..],
+            &components,
             &mut results,
         );
-        return sort_results(results);
+    } else {
+        glob_recursive(cwd, &PathBuf::new(), &components, &mut results);
     }
-
-    // Relative pattern: filesystem access uses cwd, but results use relative paths
-    glob_recursive(cwd, &PathBuf::new(), &components, &mut results);
     sort_results(results)
+}
+
+fn split_components(pattern: &[u8]) -> (bool, Vec<ShellBytes>) {
+    let absolute = pattern.starts_with(b"/");
+    let components = pattern
+        .split(|b| *b == b'/')
+        .filter(|c| !c.is_empty())
+        .map(|c| ShellBytes::from_vec(c.to_vec()))
+        .collect();
+    (absolute, components)
 }
 
 /// `fs_dir`: actual filesystem directory to read from
@@ -49,21 +51,20 @@ pub fn glob(pattern: &str, cwd: &Path) -> Vec<String> {
 fn glob_recursive(
     fs_dir: &Path,
     display_dir: &Path,
-    components: &[&str],
+    components: &[ShellBytes],
     results: &mut Vec<String>,
 ) {
     if components.is_empty() {
         return;
     }
 
-    let pattern = components[0];
+    let pattern = &components[0];
+    let pattern_shell = pattern.to_shell_string();
     let remaining = &components[1..];
 
-    // If pattern has no glob chars, just check if path exists
-    // Use symlink_metadata to include dangling symlinks (not stat which follows them)
-    if !has_glob_chars(pattern) {
-        let fs_candidate = fs_dir.join(pattern);
-        let display_candidate = display_dir.join(pattern);
+    if !has_glob_chars(&pattern_shell) {
+        let fs_candidate = fs_dir.join(pattern.to_os_string());
+        let display_candidate = display_dir.join(pattern.to_os_string());
         if remaining.is_empty() {
             if fs_candidate.symlink_metadata().is_ok() {
                 results.push(path_to_string(&display_candidate));
@@ -74,7 +75,6 @@ fn glob_recursive(
         return;
     }
 
-    // Read directory and match each entry
     let entries = match fs::read_dir(fs_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -87,19 +87,16 @@ fn glob_recursive(
         };
 
         let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
+        let name_shell = ShellBytes::from_os_str(name.as_os_str()).to_shell_string();
 
         // Dotfiles are only matched if the pattern starts with '.'
-        if name_str.starts_with('.') && !pattern.starts_with('.') {
+        if name.as_os_str().as_bytes().starts_with(b".") && !pattern.as_bytes().starts_with(b".") {
             continue;
         }
 
-        if fnmatch(pattern, name_str) {
-            let fs_full = fs_dir.join(name_str);
-            let display_full = display_dir.join(name_str);
+        if fnmatch(&pattern_shell, &name_shell) {
+            let fs_full = fs_dir.join(&name);
+            let display_full = display_dir.join(&name);
             if remaining.is_empty() {
                 results.push(path_to_string(&display_full));
             } else if fs_full.is_dir() {
@@ -164,7 +161,6 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                 si += 1;
             }
             '*' => {
-                // Skip consecutive *'s
                 while pi < pat.len() && pat[pi] == '*' {
                     pi += 1;
                 }
@@ -183,7 +179,6 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                     return false;
                 }
                 pi += 1;
-                // Only '!' is POSIX negation (not '^')
                 let negate = pi < pat.len() && pat[pi] == '!';
                 if negate {
                     pi += 1;
@@ -192,16 +187,13 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                 let mut matched = false;
                 let bracket_start = pi;
                 while pi < pat.len() {
-                    // ] is literal if it's the first char after [ or [!
                     if pat[pi] == ']' && pi != bracket_start {
                         break;
                     }
 
                     let c1 = read_bracket_char(pat, &mut pi);
-
-                    // Range: c1-c2 (but not if - is at end before ])
                     if pi + 1 < pat.len() && pat[pi] == '-' && pat[pi + 1] != ']' {
-                        pi += 1; // skip -
+                        pi += 1;
                         let c2 = read_bracket_char(pat, &mut pi);
                         if s[si] >= c1 && s[si] <= c2 {
                             matched = true;
@@ -211,7 +203,7 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                     }
                 }
                 if pi < pat.len() {
-                    pi += 1; // skip ]
+                    pi += 1;
                 }
 
                 if matched == negate {
@@ -220,7 +212,6 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
                 si += 1;
             }
             c if is_escape(c) => {
-                // CTLESC or backslash: next char is literal
                 pi += 1;
                 if pi >= pat.len() {
                     return false;
@@ -245,9 +236,9 @@ fn fnmatch_inner(pat: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool
 }
 
 fn path_to_string(path: &Path) -> String {
-    let s = path.to_string_lossy().to_string();
-    // Strip leading "./" for relative paths
-    s.strip_prefix("./").unwrap_or(&s).to_string()
+    let bytes = path.as_os_str().as_bytes();
+    let bytes = bytes.strip_prefix(b"./").unwrap_or(bytes);
+    ShellBytes::from_vec(bytes.to_vec()).to_shell_string()
 }
 
 fn sort_results(mut results: Vec<String>) -> Vec<String> {

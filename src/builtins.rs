@@ -2,8 +2,10 @@ use crate::ast::*;
 use crate::error::{ExitStatus, ShellError, Span};
 use crate::eval::Shell;
 use crate::parser::Parser;
+use crate::shell_bytes::ShellBytes;
 use crate::sys;
 use crate::test_cmd::test_eval;
+use std::os::unix::ffi::OsStrExt;
 
 impl Shell {
     /// Try to run a builtin command. Returns None if not a builtin.
@@ -21,7 +23,8 @@ impl Shell {
             "echo" => Some(self.builtin_echo(args)),
             "cd" => Some(self.builtin_cd(args)),
             "pwd" => {
-                self.write_out(&format!("{}\n", self.cwd.display()));
+                let cwd = ShellBytes::from_os_str(self.cwd.as_os_str()).to_shell_string();
+                self.write_out(&format!("{cwd}\n"));
                 Some(ExitStatus::SUCCESS)
             }
             "exit" => {
@@ -149,9 +152,9 @@ impl Shell {
 
     fn builtin_cd(&mut self, args: &[String]) -> ExitStatus {
         let dir = if args.len() > 1 {
-            args[1].as_str()
+            args[1].clone()
         } else {
-            match self.vars.get("HOME") {
+            match self.vars.get_shell("HOME") {
                 Some(h) => h,
                 None => {
                     self.err_msg("cd: HOME not set");
@@ -160,12 +163,14 @@ impl Shell {
             }
         };
 
-        let target = self.resolve_path(dir);
+        let target = self.resolve_path_bytes(&ShellBytes::from_str_lossless(&dir));
         match target.canonicalize() {
             Ok(canonical) => {
                 if canonical.is_dir() {
                     self.cwd = canonical;
-                    let _ = self.vars.set("PWD", &self.cwd.to_string_lossy());
+                    let _ = self
+                        .vars
+                        .set_bytes("PWD", ShellBytes::from_os_str(self.cwd.as_os_str()));
                     ExitStatus::SUCCESS
                 } else {
                     self.err_msg(&format!("cd: {dir}: Not a directory"));
@@ -260,7 +265,7 @@ impl Shell {
             if arg == "--" {
                 i += 1;
                 // Remaining args become positional parameters
-                self.vars.positional = args[i..].to_vec();
+                self.vars.positional = args[i..].iter().cloned().map(Into::into).collect();
                 return ExitStatus::SUCCESS;
             } else if arg == "-" {
                 // POSIX: bare "set -" turns off -x and -v
@@ -300,7 +305,7 @@ impl Shell {
                 i += 1;
             } else {
                 // Positional parameters
-                self.vars.positional = args[i..].to_vec();
+                self.vars.positional = args[i..].iter().cloned().map(Into::into).collect();
                 return ExitStatus::SUCCESS;
             }
         }
@@ -355,7 +360,7 @@ impl Shell {
             return Err(ShellError::Exit(ExitStatus::MISUSE));
         }
         let filename = &args[1];
-        let filepath = self.resolve_path(filename);
+        let filepath = self.resolve_path_bytes(&ShellBytes::from_str_lossless(filename));
         let content = match std::fs::read(&filepath) {
             Ok(bytes) => crate::encoding::bytes_to_str(&bytes),
             Err(e) => {
@@ -536,7 +541,17 @@ impl Shell {
         }
 
         // exec with command — replace process
-        let err = exec::execvp(&args[0], args);
+        let args_bytes: Vec<ShellBytes> = args.iter().cloned().map(Into::into).collect();
+        unsafe {
+            for (k, _) in std::env::vars_os() {
+                std::env::remove_var(k);
+            }
+            for (k, v) in self.vars.env_for_command_os(&[]) {
+                std::env::set_var(k, v);
+            }
+            let _ = std::env::set_current_dir(&self.cwd);
+        }
+        let err = exec::execvp(&args_bytes[0], &args_bytes);
         self.err_msg(&format!("exec: {}: {err}", args[0]));
         Ok(ExitStatus::NOT_EXECUTABLE)
     }
@@ -581,7 +596,7 @@ impl Shell {
                         self.write_out(&format!("{name} is a function\n"));
                     } else if is_builtin(name) {
                         self.write_out(&format!("{name} is a shell builtin\n"));
-                    } else if let Ok(path) = which(name) {
+                    } else if let Ok(path) = self.which(name) {
                         self.write_out(&format!("{name} is {path}\n"));
                     } else {
                         self.err_msg(&format!("{name}: not found"));
@@ -591,7 +606,7 @@ impl Shell {
                     // -v: terse — print path, or name for builtins/functions
                     if self.functions.contains_key(name.as_str()) || is_builtin(name) {
                         self.write_out(&format!("{name}\n"));
-                    } else if let Ok(path) = which(name) {
+                    } else if let Ok(path) = self.which(name) {
                         self.write_out(&format!("{path}\n"));
                     } else {
                         status = ExitStatus::FAILURE;
@@ -618,7 +633,7 @@ impl Shell {
                 self.write_out(&format!("{name} is a function\n"));
             } else if is_builtin(name) {
                 self.write_out(&format!("{name} is a shell builtin\n"));
-            } else if let Ok(path) = which(name) {
+            } else if let Ok(path) = self.which(name) {
                 self.write_out(&format!("{name} is {path}\n"));
             } else {
                 self.err_msg(&format!("{name}: not found"));
@@ -626,6 +641,32 @@ impl Shell {
             }
         }
         status
+    }
+
+    fn which(&self, name: &str) -> Result<String, ()> {
+        let name_bytes = ShellBytes::from_str_lossless(name);
+        let path = self
+            .vars
+            .get_bytes("PATH")
+            .cloned()
+            .unwrap_or_else(|| ShellBytes::from(""));
+        for dir in path.as_bytes().split(|b| *b == b':') {
+            let mut candidate = Vec::new();
+            if dir.is_empty() {
+                candidate.extend_from_slice(self.cwd.as_os_str().as_bytes());
+            } else {
+                candidate.extend_from_slice(dir);
+            }
+            if !candidate.ends_with(b"/") {
+                candidate.push(b'/');
+            }
+            candidate.extend_from_slice(name_bytes.as_bytes());
+            let candidate = ShellBytes::from_vec(candidate).to_path_buf();
+            if candidate.is_file() {
+                return Ok(ShellBytes::from_os_str(candidate.as_os_str()).to_shell_string());
+            }
+        }
+        Err(())
     }
 
     fn builtin_wait(&mut self, _args: &[String]) -> ExitStatus {
@@ -822,7 +863,7 @@ impl Shell {
         let argv: Vec<String> = if args.len() > 3 {
             args[3..].to_vec()
         } else {
-            self.vars.positional.clone()
+            self.vars.positional_shell_strings()
         };
 
         let optind: usize = self
@@ -1107,17 +1148,6 @@ pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
 
-fn which(name: &str) -> Result<String, ()> {
-    let path = std::env::var("PATH").unwrap_or_default();
-    for dir in path.split(':') {
-        let candidate = format!("{dir}/{name}");
-        if std::path::Path::new(&candidate).is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(())
-}
-
 fn unescape_echo(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -1149,13 +1179,15 @@ fn unescape_echo(s: &str) -> String {
 pub(crate) mod exec {
     use std::ffi::CString;
 
-    pub fn execvp(cmd: &str, args: &[String]) -> std::io::Error {
-        let Ok(c_cmd) = CString::new(cmd.as_bytes()) else {
+    use crate::shell_bytes::ShellBytes;
+
+    pub fn execvp(cmd: &ShellBytes, args: &[ShellBytes]) -> std::io::Error {
+        let Ok(c_cmd) = cmd.to_cstring() else {
             return std::io::Error::from_raw_os_error(libc::ENOENT);
         };
         let c_args: Vec<CString> = match args
             .iter()
-            .map(|a| CString::new(a.as_bytes()))
+            .map(ShellBytes::to_cstring)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(v) => v,
