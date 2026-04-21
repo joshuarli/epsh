@@ -1,7 +1,10 @@
 .PHONY: test conformance bench
 
+NAME       := epsh
+TARGET     := $(shell rustc -vV | awk '/^host:/ {print $$2}')
+
 test:
-	cargo test -- --test-threads=4
+	cargo test
 	cargo build
 	perl check.pl -p ./target/debug/epsh -s check-epsh.t
 
@@ -13,8 +16,16 @@ bench:
 	cargo build
 	sh tests/stress/run.sh ./target/debug/epsh dash
 
+release:
+	cargo clean -p $(NAME) --release --target $(TARGET)
+	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
+	cargo build --release \
+	  -Z build-std=std \
+	  -Z build-std-features= \
+	  --target $(TARGET)
+
 setup:
-	prek install --install-hooks
+	prek install --prepare-hooks -f
 
 pc:
 	prek --quiet run --all-files

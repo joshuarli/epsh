@@ -2,14 +2,14 @@
 name = "epsh"
 version = "0.0.6"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 description = "embeddable posix shell"
 license = "MIT"
 repository = "https://github.com/joshuarli/epsh"
 readme = "README.md"
 keywords = ["shell", "posix", "embedded", "scripting"]
 categories = ["command-line-utilities", "os::unix-apis"]
-exclude = ["check.t", "check.pl", "check-epsh.t", "filter-tests.pl", "tests/stress/"]
+exclude = ["check.t", "check.pl", "check-epsh.t", "filter-tests.pl", "tests/stress/", "rust-toolchain.toml"]
 
 [lib]
 name = "epsh"
@@ -36,12 +36,14 @@ name = "stat_path"
 path = "tests/fixtures/stat_path.rs"
 
 [dependencies]
-libc = "0.2.184"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 
 [profile.release]
-lto = "thin"
+opt-level = 3
+lto = "fat"
 codegen-units = 1
+panic = "abort"
 strip = true
