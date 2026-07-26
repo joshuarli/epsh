@@ -77,7 +77,7 @@ impl Parser {
                 // We store a dummy command for patching if there are pending heredocs.
                 if !self.lexer.pending_heredocs.is_empty() {
                     let pending: Vec<PendingHereDoc> =
-                        self.lexer.pending_heredocs.drain(..).collect();
+                        std::mem::take(&mut self.lexer.pending_heredocs);
                     for heredoc in &pending {
                         let raw = self.lexer.read_heredoc_body(heredoc)?;
                         self.heredoc_bodies
@@ -206,7 +206,7 @@ impl Parser {
     fn read_pending_heredocs(&mut self, cmd: &mut Command) -> Result<(), ShellError> {
         // First try: read from lexer directly (bodies haven't been consumed by newline yet)
         if !self.lexer.pending_heredocs.is_empty() {
-            let pending: Vec<PendingHereDoc> = self.lexer.pending_heredocs.drain(..).collect();
+            let pending: Vec<PendingHereDoc> = std::mem::take(&mut self.lexer.pending_heredocs);
             let mut bodies = Vec::new();
             for heredoc in &pending {
                 let raw = self.lexer.read_heredoc_body(heredoc)?;
@@ -216,7 +216,7 @@ impl Parser {
         }
         // Second: apply any bodies that were read at newlines (via skip_newlines)
         if !self.heredoc_bodies.is_empty() {
-            let bodies: Vec<HereDocBody> = self.heredoc_bodies.drain(..).collect();
+            let bodies: Vec<HereDocBody> = std::mem::take(&mut self.heredoc_bodies);
             Self::patch_heredocs(cmd, &bodies);
         }
         Ok(())
@@ -242,7 +242,7 @@ impl Parser {
                     // Read heredoc bodies that follow this newline
                     if !self.lexer.pending_heredocs.is_empty() {
                         let pending: Vec<PendingHereDoc> =
-                            self.lexer.pending_heredocs.drain(..).collect();
+                            std::mem::take(&mut self.lexer.pending_heredocs);
                         for heredoc in &pending {
                             let raw = self.lexer.read_heredoc_body(heredoc)?;
                             self.heredoc_bodies

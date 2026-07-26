@@ -10,9 +10,9 @@ fn hex_nibble(b: u8) -> Option<u8> {
 fn main() {
     let hex = std::env::args().nth(1).expect("missing hex argument");
     let bytes = hex.as_bytes();
-    assert!(bytes.len() % 2 == 0, "hex length must be even");
+    assert!(bytes.len().is_multiple_of(2), "hex length must be even");
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = hex_nibble(pair[0]).expect("invalid hex");
         let lo = hex_nibble(pair[1]).expect("invalid hex");
         out.push((hi << 4) | lo);
