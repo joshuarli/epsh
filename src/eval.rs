@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use fxhash::FxHashMap;
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -80,7 +80,7 @@ pub type ExternalHandler = Box<
 pub struct Shell {
     pub(crate) vars: Variables,
     /// Defined functions: name → AST body
-    pub(crate) functions: HashMap<String, Command>,
+    pub(crate) functions: FxHashMap<String, Command>,
     /// Last command's exit status ($?)
     pub(crate) exit_status: ExitStatus,
     /// Shell's PID ($$)
@@ -93,7 +93,7 @@ pub struct Shell {
     /// Shell options
     pub(crate) opts: ShellOpts,
     /// Trap handlers: signal name → command string
-    pub(crate) traps: HashMap<String, String>,
+    pub(crate) traps: FxHashMap<String, String>,
     /// True when evaluating a condition (if test, while cond, && / || operands).
     /// Suppresses set -e (errexit). Mirrors dash's EV_TESTED flag.
     pub(crate) tested: bool,
@@ -322,7 +322,7 @@ impl ShellBuilder {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         Shell {
             vars,
-            functions: HashMap::new(),
+            functions: FxHashMap::default(),
             exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
             cwd,
@@ -336,7 +336,7 @@ impl ShellBuilder {
                 noexec: self.noexec,
                 interactive: self.interactive,
             },
-            traps: HashMap::new(),
+            traps: FxHashMap::default(),
             tested: false,
             in_forked_child: false,
             ev_exit: false,
@@ -368,13 +368,13 @@ impl Shell {
     pub fn new() -> Self {
         Shell {
             vars: Variables::new(),
-            functions: HashMap::new(),
+            functions: FxHashMap::default(),
             exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             loop_depth: 0,
             opts: ShellOpts::default(),
-            traps: HashMap::new(),
+            traps: FxHashMap::default(),
             tested: false,
             in_forked_child: false,
             ev_exit: false,
@@ -410,7 +410,7 @@ impl Shell {
         &mut self.vars
     }
     /// Defined functions.
-    pub fn functions(&self) -> &HashMap<String, Command> {
+    pub fn functions(&self) -> &FxHashMap<String, Command> {
         &self.functions
     }
     /// Last command's exit status (`$?`).
@@ -434,7 +434,7 @@ impl Shell {
         &mut self.opts
     }
     /// Trap handlers.
-    pub fn traps(&self) -> &HashMap<String, String> {
+    pub fn traps(&self) -> &FxHashMap<String, String> {
         &self.traps
     }
 

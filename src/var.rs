@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use fxhash::{FxHashMap, FxHashSet};
 use std::env;
 use std::ffi::OsString;
 
@@ -86,7 +86,7 @@ pub struct Scope {
 /// Variable storage with scoping support.
 pub struct Variables {
     /// All shell variables (flat namespace, latest value wins).
-    vars: HashMap<String, Var>,
+    vars: FxHashMap<String, Var>,
     /// Environment entries inherited from the parent that are not representable
     /// as shell variables. Preserved for child processes.
     inherited_env: Vec<(ShellBytes, ShellBytes)>,
@@ -107,7 +107,7 @@ impl Default for Variables {
 impl Variables {
     /// Create variables with no inherited environment.
     pub fn new_clean() -> Self {
-        let mut vars = HashMap::new();
+        let mut vars = FxHashMap::default();
         vars.insert(
             "IFS".into(),
             Var::new(Some(ShellBytes::from(" \t\n")), VarFlags::new()),
@@ -122,7 +122,7 @@ impl Variables {
     }
 
     pub fn new() -> Self {
-        let mut vars = HashMap::new();
+        let mut vars = FxHashMap::default();
         let mut inherited_env = Vec::new();
 
         for (key, value) in env::vars_os() {
@@ -353,7 +353,7 @@ impl Variables {
         &self,
         assigns: &[(String, ShellBytes)],
     ) -> Vec<(OsString, OsString)> {
-        let mut shadowed = HashSet::new();
+        let mut shadowed = FxHashSet::default();
         for name in self.vars.iter().filter_map(|(k, v)| {
             if v.flags.has(VarFlags::EXPORT) && v.value.is_some() {
                 Some(k.as_bytes().to_vec())
