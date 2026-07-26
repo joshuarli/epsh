@@ -246,7 +246,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
                 ""
             };
             use std::os::unix::fs::MetadataExt;
-            let uid = unsafe { sys::getuid() };
+            let uid = sys::getuid();
             match std::fs::metadata(ShellBytes::from_str_lossless(p).to_path_buf()) {
                 Ok(m) => {
                     let mode = m.mode();
@@ -300,7 +300,7 @@ fn test_primary(args: &[&str], pos: &mut usize) -> bool {
                 "1"
             };
             let fd = fd.parse::<i32>().unwrap_or(1);
-            unsafe { sys::isatty(fd) != 0 }
+            unsafe { rustix::termios::isatty(std::os::fd::BorrowedFd::borrow_raw(fd)) }
         }
         "-p" if has_operand => {
             *pos += 1;

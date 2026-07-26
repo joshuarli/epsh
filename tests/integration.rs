@@ -958,6 +958,12 @@ mod kill_builtin {
     }
 
     #[test]
+    fn kill_zero_tests_process_group() {
+        // PID 0 addresses the current process group.
+        assert_output("kill -0 0; echo $?", "0\n");
+    }
+
+    #[test]
     fn kill_invalid_pid() {
         let (_, stderr, code) = run("kill -0 999999999");
         assert_ne!(code, 0);

@@ -91,7 +91,7 @@ fn main() {
     }
 
     // If stdin is a terminal and no -s flag, print usage and exit
-    if unsafe { libc::isatty(0) } != 0 {
+    if rustix::termios::isatty(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }) {
         eprintln!("epsh — embeddable POSIX shell");
         eprintln!();
         eprintln!(

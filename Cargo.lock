@@ -32,6 +32,7 @@ version = "0.0.6"
 dependencies = [
  "fxhash",
  "libc",
+ "rustix",
  "tempfile",
 ]
 

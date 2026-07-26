@@ -37,6 +37,7 @@ path = "tests/fixtures/stat_path.rs"
 [dependencies]
 libc = "0.2"
 fxhash = "0.2"
+rustix = { version = "1.1.4", features = ["fs", "pipe", "process", "runtime", "termios"] }
 
 [dev-dependencies]
 tempfile = "3"

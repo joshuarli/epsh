@@ -7,6 +7,37 @@ use crate::sys;
 use crate::test_cmd::test_eval;
 use std::os::unix::ffi::OsStrExt;
 
+fn kill_with_rustix(pid: i32, signum: i32) -> Result<(), rustix::io::Errno> {
+    if signum == 0 {
+        return match pid {
+            0 => rustix::process::test_kill_current_process_group(),
+            pid if pid > 0 => {
+                let pid = rustix::process::Pid::from_raw(pid).unwrap();
+                rustix::process::test_kill_process(pid)
+            }
+            pid => match pid.checked_neg().and_then(rustix::process::Pid::from_raw) {
+                Some(group) => rustix::process::test_kill_process_group(group),
+                None => Err(rustix::io::Errno::INVAL),
+            },
+        };
+    }
+
+    let Some(signal) = rustix::process::Signal::from_named_raw(signum) else {
+        return Err(rustix::io::Errno::INVAL);
+    };
+    match pid {
+        0 => rustix::process::kill_current_process_group(signal),
+        pid if pid > 0 => {
+            let pid = rustix::process::Pid::from_raw(pid).unwrap();
+            rustix::process::kill_process(pid, signal)
+        }
+        pid => match pid.checked_neg().and_then(rustix::process::Pid::from_raw) {
+            Some(group) => rustix::process::kill_process_group(group, signal),
+            None => Err(rustix::io::Errno::INVAL),
+        },
+    }
+}
+
 impl Shell {
     /// Try to run a builtin command. Returns None if not a builtin.
     pub(crate) fn try_builtin(
@@ -413,7 +444,7 @@ impl Shell {
         let mut continued = false;
         loop {
             // SAFETY: fd 0 (stdin) is valid; buf is a live 1-byte array.
-            let n = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
+            let n = sys::read(0, buf.as_mut_ptr().cast(), 1);
             if n <= 0 {
                 break; // EOF or error
             }
@@ -429,7 +460,7 @@ impl Shell {
             if ch == '\\' && !raw_mode {
                 // Line continuation: peek at next char
                 // SAFETY: fd 0 (stdin) is valid; buf is a live 1-byte array.
-                let n2 = unsafe { sys::read(0, buf.as_mut_ptr().cast(), 1) };
+                let n2 = sys::read(0, buf.as_mut_ptr().cast(), 1);
                 if n2 <= 0 {
                     line.push('\\');
                     break;
@@ -674,7 +705,7 @@ impl Shell {
         loop {
             let mut status = 0i32;
             // SAFETY: -1 waits for any child process; standard POSIX usage.
-            let pid = unsafe { sys::waitpid(-1, &mut status, 0) };
+            let pid = sys::waitpid(-1, &mut status, 0);
             if pid <= 0 {
                 break;
             }
@@ -744,7 +775,7 @@ impl Shell {
         }
 
         let mut i = 1;
-        let mut signum = libc::SIGTERM; // default signal
+        let mut signum = rustix::process::Signal::TERM.as_raw();
 
         // Parse signal specification
         if args[i] == "-l" || args[i] == "-L" {
@@ -780,7 +811,7 @@ impl Shell {
             }
             let sig_name = args[i].to_uppercase();
             match crate::signal::name_to_signal(&sig_name) {
-                Some(s) => signum = s,
+                Some(s) => signum = s.as_raw(),
                 None => {
                     self.err_msg(&format!("kill: {}: invalid signal specification", args[i]));
                     return ExitStatus::FAILURE;
@@ -795,7 +826,7 @@ impl Shell {
             } else {
                 let sig_name = spec.to_uppercase();
                 match crate::signal::name_to_signal(&sig_name) {
-                    Some(s) => signum = s,
+                    Some(s) => signum = s.as_raw(),
                     None => {
                         self.err_msg(&format!("kill: {}: invalid signal specification", spec));
                         return ExitStatus::FAILURE;
@@ -814,10 +845,7 @@ impl Shell {
         for pid_str in &args[i..] {
             match pid_str.parse::<i32>() {
                 Ok(pid) => {
-                    // SAFETY: Sending a signal to a process. Invalid PIDs return ESRCH.
-                    let ret = unsafe { libc::kill(pid, signum) };
-                    if ret != 0 {
-                        let err = std::io::Error::last_os_error();
+                    if let Err(err) = kill_with_rustix(pid, signum) {
                         self.err_msg(&format!("kill: ({pid}) - {err}"));
                         status = ExitStatus::FAILURE;
                     }
@@ -834,18 +862,14 @@ impl Shell {
     fn builtin_umask(&self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
             // SAFETY: umask() is always safe; no invalid arguments possible.
-            let mask = unsafe { sys::umask(0) };
-            unsafe {
-                sys::umask(mask);
-            }
+            let mask = sys::umask(0);
+            sys::umask(mask);
             self.write_out(&format!("{mask:04o}\n"));
             return ExitStatus::SUCCESS;
         }
         if let Ok(mask) = u32::from_str_radix(&args[1], 8) {
             // SAFETY: umask() is always safe; any mode_t value is valid.
-            unsafe {
-                sys::umask(mask as libc::mode_t);
-            }
+            sys::umask(mask);
             ExitStatus::SUCCESS
         } else {
             self.err_msg(&format!("umask: {}: invalid mask", args[1]));
@@ -1183,7 +1207,7 @@ pub(crate) mod exec {
 
     pub fn execvp(cmd: &ShellBytes, args: &[ShellBytes]) -> std::io::Error {
         let Ok(c_cmd) = cmd.to_cstring() else {
-            return std::io::Error::from_raw_os_error(libc::ENOENT);
+            return std::io::Error::from(rustix::io::Errno::NOENT);
         };
         let c_args: Vec<CString> = match args
             .iter()
@@ -1191,9 +1215,9 @@ pub(crate) mod exec {
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(v) => v,
-            Err(_) => return std::io::Error::from_raw_os_error(libc::EINVAL),
+            Err(_) => return std::io::Error::from(rustix::io::Errno::INVAL),
         };
-        let c_argv: Vec<*const libc::c_char> = c_args
+        let c_argv: Vec<*const std::os::raw::c_char> = c_args
             .iter()
             .map(|a| a.as_ptr())
             .chain(std::iter::once(std::ptr::null()))

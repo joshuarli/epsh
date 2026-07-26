@@ -473,9 +473,7 @@ impl Shell {
             }
         } else {
             // SAFETY: fd 1 (stdout) is always valid; data pointer and length are from a live Vec.
-            unsafe {
-                sys::write(1, data.as_ptr() as *const _, data.len());
-            }
+            sys::write(1, data.as_ptr() as *const _, data.len());
         }
     }
 
@@ -488,9 +486,7 @@ impl Shell {
             }
         } else {
             // SAFETY: fd 2 (stderr) is always valid; data pointer and length are from a live Vec.
-            unsafe {
-                sys::write(2, data.as_ptr() as *const _, data.len());
-            }
+            sys::write(2, data.as_ptr() as *const _, data.len());
         }
     }
 
@@ -511,20 +507,14 @@ impl Shell {
     }
 
     fn wait_child_pgid(&mut self, pid: i32, pgid: i32) -> crate::error::Result<ExitStatus> {
-        let wuntraced = if self.opts.interactive {
-            libc::WUNTRACED
-        } else {
-            0
-        };
+        let wuntraced = if self.opts.interactive { 1 } else { 0 };
 
         // If no cancel flag or timeout, just block
         if self.cancel.is_none() && self.timeout.is_none() {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            unsafe {
-                sys::waitpid(pid, &mut status, wuntraced);
-            }
-            if libc::WIFSTOPPED(status) {
+            sys::waitpid(pid, &mut status, wuntraced);
+            if sys::wifstopped(status) {
                 // Don't remove from child_pids — process is still alive
                 return Err(ShellError::Stopped { pid, pgid });
             }
@@ -537,16 +527,14 @@ impl Shell {
         std::thread::spawn(move || {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID obtained from fork().
-            unsafe {
-                sys::waitpid(pid, &mut status, wuntraced);
-            }
+            sys::waitpid(pid, &mut status, wuntraced);
             let _ = tx.send(status);
         });
         loop {
             // Check for result with a short timeout to allow cancel checks
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(status) => {
-                    if libc::WIFSTOPPED(status) {
+                    if sys::wifstopped(status) {
                         return Err(ShellError::Stopped { pid, pgid });
                     }
                     self.child_pids.retain(|&p| p != pid);
@@ -561,9 +549,10 @@ impl Shell {
             if let Err(e) = self.check_cancel() {
                 // Cancel or timeout — kill and reap
                 // SAFETY: pid is a valid child PID; negated for process group kill. SIGKILL is always valid.
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                let _ = rustix::process::kill_process_group(
+                    rustix::process::Pid::from_raw(pid).unwrap(),
+                    rustix::process::Signal::KILL,
+                );
                 // The thread will complete waitpid and send the status; just drain it
                 let _ = rx.recv();
                 self.child_pids.retain(|&p| p != pid);
@@ -577,17 +566,16 @@ impl Shell {
         for &pid in &self.child_pids {
             // Kill the process group (negative PID)
             // SAFETY: pid is a valid child PID from fork(); negated for process group kill.
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
+            let _ = rustix::process::kill_process_group(
+                rustix::process::Pid::from_raw(pid).unwrap(),
+                rustix::process::Signal::KILL,
+            );
         }
         // Reap them
         for &pid in &self.child_pids {
             let mut status = 0i32;
             // SAFETY: pid is a valid child PID; reaping after kill.
-            unsafe {
-                sys::waitpid(pid, &mut status, 0);
-            }
+            sys::waitpid(pid, &mut status, 0);
         }
         self.child_pids.clear();
     }
@@ -1155,9 +1143,7 @@ impl Shell {
             for s in saved_fds {
                 if let Some(copy) = s.saved_copy {
                     // SAFETY: copy is a valid fd from fcntl_dupfd_cloexec.
-                    unsafe {
-                        sys::close(copy);
-                    }
+                    sys::close(copy);
                 }
             }
         } else {
@@ -1293,9 +1279,10 @@ impl Shell {
                 let child_id = child.id() as i32;
                 // Isolate in own process group from parent (allows posix_spawn path)
                 // SAFETY: child_id is a valid PID just returned by spawn().
-                unsafe {
-                    libc::setpgid(child_id, child_id);
-                }
+                let _ = rustix::process::setpgid(
+                    rustix::process::Pid::from_raw(child_id),
+                    rustix::process::Pid::from_raw(child_id),
+                );
                 self.child_pids.push(child_id);
 
                 // Spawn relay threads for sinks, keeping handles to join later
@@ -1324,9 +1311,10 @@ impl Shell {
                         if let Err(e) = self.check_cancel() {
                             // Kill via PID since child was moved to the thread
                             // SAFETY: child_id is a valid PID from the spawned process.
-                            unsafe {
-                                libc::kill(child_id, libc::SIGKILL);
-                            }
+                            let _ = rustix::process::kill_process(
+                                rustix::process::Pid::from_raw(child_id).unwrap(),
+                                rustix::process::Signal::KILL,
+                            );
                             let _ = rx.recv(); // wait for the thread to finish
                             self.child_pids.retain(|&p| p != child_id);
                             for h in handles {
@@ -1369,10 +1357,8 @@ impl Shell {
         for _ in 0..commands.len() - 1 {
             let mut fds = [0i32; 2];
             // SAFETY: fds is a valid 2-element array for pipe() to write into.
-            unsafe {
-                if sys::pipe(fds.as_mut_ptr()) != 0 {
-                    return Err(ShellError::Io(std::io::Error::last_os_error()));
-                }
+            if sys::pipe(fds.as_mut_ptr()) != 0 {
+                return Err(ShellError::Io(std::io::Error::last_os_error()));
             }
             pipes.push((fds[0], fds[1]));
         }
@@ -1400,7 +1386,14 @@ impl Shell {
                     // Child: join pipeline process group
                     // First child creates the group (pgid==0 → setpgid(0,0))
                     // Subsequent children join it
-                    libc::setpgid(0, pgid);
+                    let _ = rustix::process::setpgid(
+                        None,
+                        if pgid == 0 {
+                            None
+                        } else {
+                            rustix::process::Pid::from_raw(pgid)
+                        },
+                    );
                     self.in_forked_child = true;
                     // Connect stdin from previous pipe
                     if i > 0 {
@@ -1431,7 +1424,10 @@ impl Shell {
                 if pgid == 0 {
                     pgid = pid; // first child's PID is the group leader
                 }
-                libc::setpgid(pid, pgid);
+                let _ = rustix::process::setpgid(
+                    rustix::process::Pid::from_raw(pid),
+                    rustix::process::Pid::from_raw(pgid),
+                );
                 children.push(pid);
                 self.child_pids.push(pid);
             }
@@ -1440,18 +1436,17 @@ impl Shell {
         // Parent: close all pipe fds
         for &(read_fd, write_fd) in &pipes {
             // SAFETY: fds are valid from pipe() and not yet closed in parent.
-            unsafe {
-                sys::close(read_fd);
-                sys::close(write_fd);
-            }
+            sys::close(read_fd);
+            sys::close(write_fd);
         }
 
         // Interactive mode: give the pipeline the terminal
         if self.opts.interactive && pgid > 0 {
             // SAFETY: pgid is a valid process group from setpgid; fd 0 is stdin.
-            unsafe {
-                libc::tcsetpgrp(0, pgid);
-            }
+            let _ = rustix::termios::tcsetpgrp(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                rustix::process::Pid::from_raw(pgid).unwrap(),
+            );
         }
 
         // Wait for all children, checking cancel between stages
@@ -1470,9 +1465,10 @@ impl Shell {
                 Err(ShellError::Stopped { pid: _, pgid: _ }) if self.opts.interactive => {
                     // Reclaim terminal before propagating
                     // SAFETY: getpgrp() and tcsetpgrp are always safe with valid fd.
-                    unsafe {
-                        libc::tcsetpgrp(0, libc::getpgrp());
-                    }
+                    let _ = rustix::termios::tcsetpgrp(
+                        unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                        rustix::process::getpgrp(),
+                    );
                     return Err(ShellError::Stopped {
                         pid: children[children.len() - 1],
                         pgid,
@@ -1480,18 +1476,20 @@ impl Shell {
                 }
                 Err(e @ (ShellError::Cancelled | ShellError::TimedOut)) => {
                     if self.opts.interactive {
-                        unsafe {
-                            libc::tcsetpgrp(0, libc::getpgrp());
-                        }
+                        let _ = rustix::termios::tcsetpgrp(
+                            unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                            rustix::process::getpgrp(),
+                        );
                     }
                     self.kill_children();
                     return Err(e);
                 }
                 Err(e) => {
                     if self.opts.interactive {
-                        unsafe {
-                            libc::tcsetpgrp(0, libc::getpgrp());
-                        }
+                        let _ = rustix::termios::tcsetpgrp(
+                            unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                            rustix::process::getpgrp(),
+                        );
                     }
                     return Err(e);
                 }
@@ -1501,9 +1499,10 @@ impl Shell {
         // Interactive mode: reclaim the terminal
         if self.opts.interactive && pgid > 0 {
             // SAFETY: getpgrp() returns our process group; fd 0 is stdin.
-            unsafe {
-                libc::tcsetpgrp(0, libc::getpgrp());
-            }
+            let _ = rustix::termios::tcsetpgrp(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                rustix::process::getpgrp(),
+            );
         }
 
         if self.opts.pipefail && !pipefail_status.success() {
@@ -1529,7 +1528,7 @@ impl Shell {
 
             if pid == 0 {
                 // Child — isolate in own process group
-                libc::setpgid(0, 0);
+                let _ = rustix::process::setpgid(None, None);
                 let parent_exit_trap = self
                     .traps
                     .remove("EXIT")
@@ -1572,7 +1571,7 @@ impl Shell {
             }
 
             if pid == 0 {
-                libc::setpgid(0, 0);
+                let _ = rustix::process::setpgid(None, None);
                 let _saved = match self.setup_redirections(redirs) {
                     Ok(s) => s,
                     Err(_) => sys::exit_child(ExitStatus::FAILURE),
@@ -1688,7 +1687,7 @@ impl Shell {
 
             if pid == 0 {
                 // Child: redirect stdout to write end of pipe
-                libc::setpgid(0, 0);
+                let _ = rustix::process::setpgid(None, None);
                 self.in_forked_child = true;
                 sys::close(fds[0]);
                 sys::dup2(fds[1], 1);
@@ -1996,8 +1995,8 @@ mod tests {
         // that has already been consumed.
         let watcher = std::thread::spawn(move || {
             for _ in 0..2000 {
-                let r = unsafe { libc::fcntl(0, libc::F_GETFD) };
-                if r == -1 {
+                let r = rustix::io::fcntl_getfd(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) });
+                if r.is_err() {
                     corrupted_clone.store(true, Ordering::Relaxed);
                 }
                 std::thread::sleep(std::time::Duration::from_micros(50));
