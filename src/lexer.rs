@@ -75,7 +75,7 @@ impl PartialEq for Token {
 impl Eq for Token {}
 
 impl Token {
-    /// Check if this is a redirection operator.
+    /// Check if this token is a redirection operator.
     pub fn is_redir(&self) -> bool {
         matches!(
             self,
@@ -110,7 +110,7 @@ enum WordCtx {
     Brace,
 }
 
-/// Shell lexer / tokenizer.
+/// Shell lexer that converts source text into tokens and shell words.
 ///
 /// Converts a source string into a stream of tokens. Handles:
 /// - Operator recognition (|, &&, ||, ;, &, redirections)
@@ -118,7 +118,7 @@ enum WordCtx {
 /// - Quoting (single quotes, double quotes, backslash)
 /// - Here-document delimiter collection
 /// - Comment stripping
-/// - Single-pass word tokenization into Vec<WordPart>
+/// - Single-pass lexical analysis into `Vec<WordPart>`
 pub struct Lexer {
     src: Vec<char>,
     pos: usize,

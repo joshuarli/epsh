@@ -57,7 +57,7 @@ fn spawn_relay(
     })
 }
 
-fn is_pure_builtin(name: &str) -> bool {
+fn is_command_substitution_builtin(name: &str) -> bool {
     matches!(
         name,
         "echo" | "printf" | "true" | "false" | ":" | "pwd" | "type" | "test" | "[" | "command"
@@ -73,8 +73,8 @@ use crate::var::Variables;
 
 /// Callback for external command execution.
 ///
-/// Receives expanded args (args[0] is the command name) and prefix assignment
-/// environment pairs. Redirections are already applied to fds before the
+/// Receives expanded argv (`argv[0]` is the command name) and prefix assignment
+/// pairs. Redirections are already applied to file descriptors before the
 /// handler is called. Return the exit status of the command.
 pub type ExternalHandler = Box<
     dyn FnMut(&[ShellBytes], &[(String, ShellBytes)]) -> crate::error::Result<ExitStatus> + Send,
@@ -231,7 +231,7 @@ impl expand::ShellExpand for Shell {
 
 /// Builder for configuring a [`Shell`] instance.
 ///
-/// Use [`Shell::builder()`] to start, then chain options, then `.build()`.
+/// Use [`Shell::builder()`] to configure options, then call `.build()`.
 /// All settings have sensible defaults — you only need to set what you want.
 pub struct ShellBuilder {
     cwd: Option<PathBuf>,
@@ -623,8 +623,8 @@ impl Shell {
     /// When set, the handler is called instead of `eval_external` for commands
     /// that are not builtins or functions. Redirections are already applied to
     /// fds before the handler runs. The handler receives:
-    /// - `args`: expanded arguments (args[0] is the command name)
-    /// - `env`: prefix assignment pairs (`FOO=bar cmd` → `[("FOO", "bar")]`)
+    /// - `argv`: expanded arguments (`argv[0]` is the command name)
+    /// - `prefix_assignments`: variable assignments (`FOO=bar cmd` → `[("FOO", "bar")]`)
     pub fn set_external_handler(&mut self, handler: ExternalHandler) {
         self.external_handler = Some(handler);
     }
@@ -1171,7 +1171,7 @@ impl Shell {
                 self.ev_exit = false; // function body may have multiple commands
                 self.eval_function(&func_body, &expanded_args, assigns, &[], span)
             } else if self.external_handler.is_some() {
-                // Build prefix assignment env pairs for the handler
+                // Build prefix assignment pairs for the external handler
                 let mut env_pairs = Vec::new();
                 for assign in assigns {
                     let value = self.expand_string(&assign.value)?;
@@ -1633,7 +1633,7 @@ impl Shell {
 
     /// Execute a command substitution and return its output.
     pub fn command_subst(&mut self, cmd: &Command) -> crate::error::Result<String> {
-        // In-process comsub for pure builtins: capture output without forking.
+        // In-process command substitution for safe builtins: capture output without forking.
         // Pure builtins (echo, printf, true, false, :, pwd, type, test/[) don't
         // modify shell state, so running them in-process is safe and avoids the
         // fork+pipe+waitpid overhead entirely.
@@ -1654,7 +1654,10 @@ impl Shell {
                 }
                 Ok(())
             })();
-            if expand_ok.is_ok() && !expanded.is_empty() && is_pure_builtin(&expanded[0]) {
+            if expand_ok.is_ok()
+                && !expanded.is_empty()
+                && is_command_substitution_builtin(&expanded[0])
+            {
                 // Capture output to buffer instead of forking
                 let saved_sink = self.stdout_sink.take();
                 let buf = Arc::new(Mutex::new(Vec::<u8>::new()));

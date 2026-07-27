@@ -11,7 +11,8 @@ pub struct Program {
 /// A shell command (any node in the command grammar).
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Simple command: optional assignments, arguments, redirections.
+    /// Simple command: optional assignments, command words, and redirections.
+    /// The first command word is the command name when present.
     /// `FOO=bar cmd arg1 arg2 >file`
     Simple {
         assigns: Vec<Assignment>,
@@ -107,8 +108,9 @@ pub struct Assignment {
     pub span: Span,
 }
 
-/// A shell word: a list of parts that concatenate to form a single token.
-/// For example, `hello"world"${x}` is three parts: Literal, DoubleQuoted, Param.
+/// A shell word is one lexical word token made from concatenated parts.
+/// Expansion may turn it into zero or more fields. For example,
+/// `hello"world"${x}` is three parts: Literal, DoubleQuoted, Param.
 #[derive(Debug, Clone)]
 pub struct Word {
     pub parts: Vec<WordPart>,

@@ -31,8 +31,8 @@ exit code.
 
 ## At a glance
 
-- **dash conformance** on the mksh test suite (161/167 dash-passable tests)
-- **Builder API** — configure shell options, sinks, timeouts, cancellation in one chain
+- **dash conformance** on the mksh test suite
+- **Builder API** — configure shell options, sinks, timeouts, and cancellation in one builder sequence
 - **Per-shell working directory** — no process-global state, safe for concurrent use
 - **Cancellation + timeout** — kills child process groups within milliseconds
 - **Output capture** via sinks — no pipe wrangling
@@ -106,8 +106,8 @@ editing, job control builtins). However, it provides the minimal primitives
 needed for an interactive shell to be built on top:
 
 - **`external_handler`**: Replace the default fork+exec with your own process
-  spawner. Your handler receives expanded args and env pairs with redirections
-  already applied to fds. This lets you own the fork/exec/wait cycle for
+  spawner. Your handler receives expanded argv and prefix assignment pairs with redirections
+  already applied to file descriptors. This lets you own the fork/exec/wait cycle for
   terminal and job control.
 
 - **`interactive` mode**: When enabled, pipelines call `tcsetpgrp` to give the
@@ -122,6 +122,21 @@ needed for an interactive shell to be built on top:
 Everything else — prompt rendering, line editing, history, `fg`/`bg`/`jobs`
 builtins, signal mask management — is the interactive shell's responsibility.
 epsh handles parsing, expansion, control flow, builtins, and redirections.
+
+## Shell terminology
+
+- A token is a lexical unit. A shell word is an unexpanded sequence of word
+  parts; a field is an argument produced after expansion.
+- A simple command has assignments, a command name, arguments, and redirections.
+- A pipeline joins commands with `|`. An AND-OR list uses `&&` or `||`; a
+  sequential list uses `;` or a newline. List is the umbrella term.
+- Parameter expansion handles `$HOME`; pathname expansion, or globbing, handles
+  `*.rs`; command substitution handles `$(...)` and backticks.
+- A builtin runs in the shell. An external command runs through the configured
+  external handler or the default process executor.
+
+The parser and AST support the full epsh language; an embedding application may
+intentionally expose a narrower contract.
 
 ## CLI
 
@@ -155,7 +170,7 @@ epsh's conformance target is dash, the Debian default `/bin/sh`. The
 implementation was built by studying dash's source directly — not by
 guessing at POSIX spec wording. Key mechanisms ported from dash:
 
-- Single-pass word tokenization with syntax-context tracking
+- Single-pass lexical analysis with syntax-context tracking
 - `EV_TESTED` errexit suppression in conditionals and `&&`/`||`
 - `in_forked_child` / `ev_exit` to prevent double-fork and enable exec-direct
 - Heredoc body reading at newlines (not at parse time)
@@ -179,12 +194,11 @@ These live in the interactive shell layer, not in epsh:
 ## Testing
 
 ```sh
-cargo test                      # 314 tests
+cargo test
 cargo test --test api_stability # API surface regression tests
 cargo test --test embedding     # embedding API tests (31)
 cargo test --test integration   # shell behavior tests (122)
 cargo build && perl check.pl \
   -p ./target/debug/epsh \
-  -s check-epsh.t              # 161/167 mksh conformance
+  -s check-epsh.t              # mksh conformance
 ```
-

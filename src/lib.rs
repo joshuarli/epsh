@@ -42,11 +42,11 @@ pub mod encoding;
 pub mod error;
 /// Shell interpreter: [`eval::Shell`], [`eval::ShellBuilder`].
 pub mod eval;
-/// Word expansion: tilde, parameter, arithmetic, field splitting, globbing.
+/// Word expansion: tilde, parameter, arithmetic, field splitting, and pathname expansion.
 pub mod expand;
 /// Glob pattern matching and pathname expansion.
 pub mod glob;
-/// Lexer/tokenizer.
+/// Shell lexer that converts source text into tokens and shell words.
 pub mod lexer;
 /// Recursive-descent parser producing [`ast::Program`].
 pub mod parser;

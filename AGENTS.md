@@ -1,8 +1,7 @@
 # epsh — Embeddable POSIX Shell
 
-Non-interactive, embeddable POSIX shell in Rust + libc. Script executor for coding agents.
-
-167/167 mksh conformance on dash-passable tests. 10k lines, 376 tests, zero clippy warnings.
+Non-interactive, embeddable POSIX shell in Rust + libc. It executes command
+strings and scripts for Rust applications, including coding agents.
 
 ## Architecture
 
@@ -11,11 +10,11 @@ src/
   lib.rs          Public API, module declarations
   main.rs         CLI binary: epsh [-c cmd] [-e] [script.sh]
   ast.rs          AST types: Command, Word, WordPart, Redir, ParamExpr
-  lexer.rs        Single-pass tokenizer with unified word-part builder
+  lexer.rs        Single-pass lexer with unified word-part builder
   parser.rs       Recursive-descent parser, heredoc body reading
-  eval.rs         Shell struct, ShellBuilder, eval dispatch, pipelines, comsub
+  eval.rs         Shell struct, ShellBuilder, command evaluation, pipelines, command substitution
   builtins.rs     30 builtins: echo, cd, test, read, set, trap, printf, kill, ...
-  expand.rs       Word expansion: tilde, param, arith, IFS split, glob, patterns
+  expand.rs       Word expansion: tilde, parameter, arithmetic, field splitting, pathname expansion, patterns
   arith.rs        $((…)) evaluator with short-circuit (noeval), int var cache
   var.rs          Variable storage with scope stack, integer cache
   glob.rs         Custom fnmatch + pathname expansion (cwd-aware)
@@ -53,9 +52,9 @@ let program = Parser::new("echo hello").parse().unwrap();
 let status = shell.run_program(&program);
 
 // Custom process spawner (for sandboxing, job control, SSH proxy)
-shell.set_external_handler(Box::new(|args, env| {
-    // args[0] is command name, env is prefix assignments
-    // redirections already applied to fds
+shell.set_external_handler(Box::new(|argv, prefix_assignments| {
+    // argv[0] is the command name; prefix_assignments are variable assignments
+    // redirections already applied to file descriptors
     todo!("spawn the process your way")
 }));
 
@@ -74,12 +73,12 @@ assert!(!is_builtin("rm"));
 ## Testing
 
 ```sh
-cargo test                                              # 376 tests
+cargo test
 cargo test --test api_stability                         # API surface regression
 cargo test --test embedding                             # embedding API tests
 cargo test --test integration                           # shell behavior tests
 cargo build && perl check.pl -p ./target/debug/epsh \
-  -s check-epsh.t                                       # 167/167 mksh conformance
+  -s check-epsh.t                                       # mksh conformance
 sh tests/stress/run.sh ./target/debug/epsh dash         # performance vs dash
 perl filter-tests.pl check.t > check-epsh.t             # regenerate filtered tests
 ```
@@ -90,7 +89,7 @@ Fork-dominated operations (typical coding agent workload) are at parity:
 
 | Operation | vs dash | Technique |
 |-----------|---------|-----------|
-| Builtin comsub | **3.6x faster** | Fork-free `$(echo ...)` |
+| Builtin command substitution | **3.6x faster** | Fork-free `$(echo ...)` |
 | Heredocs | **0.8x** | Faster than dash |
 | Pipelines | **1.1x** | posix_spawn, exec-direct |
 | External commands | **1.1x** | At parity |
@@ -206,6 +205,29 @@ primitives for an interactive shell to be built on top:
 
 Everything else (prompt, history, line editing, `fg`/`bg`/`jobs`) is the
 interactive shell's responsibility.
+
+## Agent Discoverability and Shell Terminology
+
+Coding agents navigate by filenames and text search. Keep names distinctive,
+use one spelling per concept, and put important explanations above the
+definitions they describe. Name tests after the source or behavior they cover;
+update definitions, call sites, tests, and docs together during renames.
+
+Use shell terms precisely:
+
+- A token is a lexical unit; a shell word is an unexpanded sequence of word
+  parts; a field is an argument produced after expansion.
+- A simple command has assignments, a command name, arguments, and redirections.
+- A pipeline joins commands with `|`; an AND-OR list uses `&&` or `||`; a
+  sequential list uses `;` or a newline. Use list as the umbrella term.
+- Parameter expansion handles `$HOME`; pathname expansion, or globbing, handles
+  `*.rs`; command substitution handles `$(...)` and backticks.
+- A builtin runs in the shell; an external command runs through the external
+  handler or default process executor.
+
+`epsh` may parse more constructs than an embedding application exposes. Treat
+the embedding contract and tests as authoritative, not the dependency's full
+parser capability.
 
 ## Known Limitations
 
