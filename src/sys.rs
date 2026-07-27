@@ -1,27 +1,49 @@
 //! Thin wrappers around syscalls, backed by rustix where possible.
 //!
-//! `fork` and `execvp` have no rustix equivalent and remain thin libc wrappers.
+//! `fork` and `execve` have no rustix equivalent and remain thin libc wrappers.
 //! Everything else is routed through rustix (`process`, `io`, `pipe`, `termios`,
 //! `fs`, `runtime` features).
 
 use std::ffi::c_void;
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
-// `fork` and `execvp` have no rustix equivalent — keep libc wrappers.
-pub use libc::{execvp, fork};
+// `fork` and `execve` have no rustix equivalent — keep libc wrappers.
+pub use libc::{execve, fork};
 
 use rustix::fs::Mode;
 use rustix::process::{Pid, WaitOptions};
 
-/// Create a pipe, writing the (read, write) fds into `fds` (length >= 2).
-/// Returns 0 on success, -1 on error. Mirrors libc `pipe(int[2])`.
+/// Create a close-on-exec pipe, writing the (read, write) fds into `fds`
+/// (length >= 2). Returns 0 on success, -1 on error. Mirrors libc `pipe(int[2])`.
 pub fn pipe(fds: *mut i32) -> i32 {
-    match rustix::pipe::pipe() {
+    #[cfg(target_vendor = "apple")]
+    let result = rustix::pipe::pipe();
+    #[cfg(not(target_vendor = "apple"))]
+    let result = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC);
+
+    match result {
         Ok((r, w)) => {
             // SAFETY: caller guarantees `fds` points to a writable [i32; 2].
+            let read_fd = r.into_raw_fd();
+            let write_fd = w.into_raw_fd();
+            #[cfg(target_vendor = "apple")]
+            if rustix::io::fcntl_setfd(
+                unsafe { BorrowedFd::borrow_raw(read_fd) },
+                rustix::io::FdFlags::CLOEXEC,
+            )
+            .and(rustix::io::fcntl_setfd(
+                unsafe { BorrowedFd::borrow_raw(write_fd) },
+                rustix::io::FdFlags::CLOEXEC,
+            ))
+            .is_err()
+            {
+                close(read_fd);
+                close(write_fd);
+                return -1;
+            }
             unsafe {
-                *fds = r.into_raw_fd();
-                *fds.add(1) = w.into_raw_fd();
+                *fds = read_fd;
+                *fds.add(1) = write_fd;
             }
             0
         }
@@ -148,4 +170,25 @@ pub fn exit_child(status: crate::error::ExitStatus) -> ! {
     // `rustix::runtime::exit_group` is linux_raw-only, so use libc here for
     // cross-platform parity with the original `_exit` semantics (no atexit flush).
     unsafe { libc::_exit(status.code()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipe_fds_are_close_on_exec() {
+        let mut fds = [-1; 2];
+        assert_eq!(pipe(fds.as_mut_ptr()), 0);
+
+        let read_flags = rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(fds[0]) })
+            .expect("read end flags");
+        let write_flags = rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(fds[1]) })
+            .expect("write end flags");
+        close(fds[0]);
+        close(fds[1]);
+
+        assert!(read_flags.contains(rustix::io::FdFlags::CLOEXEC));
+        assert!(write_flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
 }

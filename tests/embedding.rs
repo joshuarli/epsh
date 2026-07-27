@@ -1,3 +1,5 @@
+use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +10,7 @@ use epsh::builtins::{BUILTIN_NAMES, is_builtin};
 use epsh::error::ExitStatus;
 use epsh::eval::Shell;
 use epsh::parser::Parser;
+use tempfile::tempdir;
 
 fn parse(src: &str) -> Program {
     Parser::new(src).parse().unwrap()
@@ -277,6 +280,84 @@ mod cwd_isolation {
         // macOS: /tmp → /private/tmp
         let cwd = shell.cwd().to_string_lossy().to_string();
         assert!(cwd == "/tmp" || cwd == "/private/tmp");
+    }
+
+    #[test]
+    fn cd_dot_navigation_preserves_canonical_paths() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let child = real.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let canonical_child = fs::canonicalize(&child).unwrap();
+        let canonical_real = fs::canonicalize(&real).unwrap();
+        let canonical_temp = fs::canonicalize(temp.path()).unwrap();
+
+        let mut shell = Shell::builder().cwd(child.clone()).build();
+        assert_eq!(shell.run_program(&parse("cd .")), ExitStatus::SUCCESS);
+        assert_eq!(shell.cwd(), canonical_child);
+
+        assert_eq!(shell.run_program(&parse("cd ..")), ExitStatus::SUCCESS);
+        assert_eq!(shell.cwd(), canonical_real);
+
+        assert_eq!(shell.run_program(&parse("cd ..")), ExitStatus::SUCCESS);
+        assert_eq!(shell.cwd(), canonical_temp);
+    }
+
+    #[test]
+    fn cd_dot_navigation_clamps_at_root() {
+        let mut shell = Shell::builder().cwd(PathBuf::from("/")).build();
+        assert_eq!(
+            shell.run_program(&parse("cd ../../..")),
+            ExitStatus::SUCCESS
+        );
+        assert_eq!(shell.cwd(), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn cd_symlink_then_parent_uses_canonical_parent() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let child = real.join("child");
+        let link = temp.path().join("link");
+        fs::create_dir_all(&child).unwrap();
+        symlink("real", &link).unwrap();
+        let canonical_child = fs::canonicalize(&child).unwrap();
+        let canonical_real = fs::canonicalize(&real).unwrap();
+
+        let mut shell = Shell::builder().cwd(temp.path().to_path_buf()).build();
+        assert_eq!(
+            shell.run_program(&parse("cd link/child")),
+            ExitStatus::SUCCESS
+        );
+        assert_eq!(shell.cwd(), canonical_child);
+
+        assert_eq!(shell.run_program(&parse("cd ..")), ExitStatus::SUCCESS);
+        assert_eq!(shell.cwd(), canonical_real);
+    }
+
+    #[test]
+    fn cd_normal_component_still_resolves_symlinks() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        fs::create_dir(&real).unwrap();
+        symlink("real", &link).unwrap();
+        let canonical_real = fs::canonicalize(&real).unwrap();
+
+        let mut shell = Shell::builder().cwd(temp.path().to_path_buf()).build();
+        assert_eq!(shell.run_program(&parse("cd link")), ExitStatus::SUCCESS);
+        assert_eq!(shell.cwd(), canonical_real);
+    }
+
+    #[test]
+    fn failed_cd_does_not_change_cwd() {
+        let temp = tempdir().unwrap();
+        let start = temp.path().join("start");
+        fs::create_dir(&start).unwrap();
+        let mut shell = Shell::builder().cwd(start.clone()).build();
+
+        assert_eq!(shell.run_program(&parse("cd missing")), ExitStatus::FAILURE);
+        assert_eq!(shell.cwd(), start);
     }
 }
 

@@ -1,11 +1,36 @@
 use fxhash::FxHashMap;
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ast::*;
+
+fn is_dot_navigation(path: &Path) -> bool {
+    let mut has_component = false;
+    for component in path.components() {
+        has_component = true;
+        if !matches!(component, Component::CurDir | Component::ParentDir) {
+            return false;
+        }
+    }
+    has_component
+}
+
+fn apply_dot_navigation(cwd: &Path, path: &Path) -> PathBuf {
+    let mut result = cwd.to_path_buf();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            _ => unreachable!("is_dot_navigation filters non-navigation components"),
+        }
+    }
+    result
+}
 
 /// Builtins safe to run in-process for command substitution.
 /// Either pure (no shell state modification) or delegates to pure commands.
@@ -88,6 +113,8 @@ pub struct Shell {
     /// Current working directory — per-Shell, not process-global.
     /// All relative paths (redirections, glob, source) resolve against this.
     pub(crate) cwd: PathBuf,
+    /// True when `cwd` contains no unresolved symlinks.
+    pub(crate) cwd_is_canonical: bool,
     /// Number of nested loops (for break/continue counting)
     pub(crate) loop_depth: usize,
     /// Shell options
@@ -317,15 +344,20 @@ impl ShellBuilder {
         } else {
             Variables::new()
         };
-        let cwd = self
-            .cwd
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        let (cwd, cwd_is_canonical) = match self.cwd {
+            Some(cwd) => (cwd, false),
+            None => (
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                true,
+            ),
+        };
         Shell {
             vars,
             functions: FxHashMap::default(),
             exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
             cwd,
+            cwd_is_canonical,
             loop_depth: 0,
             opts: ShellOpts {
                 errexit: self.errexit,
@@ -372,6 +404,7 @@ impl Shell {
             exit_status: ExitStatus::SUCCESS,
             pid: std::process::id(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            cwd_is_canonical: true,
             loop_depth: 0,
             opts: ShellOpts::default(),
             traps: FxHashMap::default(),
@@ -599,6 +632,20 @@ impl Shell {
     /// Set the shell's working directory.
     pub fn set_cwd(&mut self, dir: PathBuf) {
         self.cwd = dir;
+        self.cwd_is_canonical = false;
+    }
+
+    pub(crate) fn resolve_cd_path(&self, path: &Path) -> std::io::Result<PathBuf> {
+        if self.cwd_is_canonical && path.is_relative() && is_dot_navigation(path) {
+            return Ok(apply_dot_navigation(&self.cwd, path));
+        }
+
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd.join(path)
+        };
+        target.canonicalize()
     }
 
     /// Set shell arguments as raw shell bytes.
@@ -1232,18 +1279,11 @@ impl Shell {
         // When ev_exit is set (pipeline child about to _exit), exec directly
         // instead of fork+exec. Mirrors dash's shellexec fast-path.
         if self.ev_exit {
-            // SAFETY: ev_exit is only set in forked children (pipeline/subshell),
-            // which are single-threaded. set_var/set_current_dir are safe here.
-            unsafe {
-                for (k, _) in std::env::vars_os() {
-                    std::env::remove_var(k);
-                }
-                for (k, v) in self.vars.env_for_command_os(&assign_bytes) {
-                    std::env::set_var(k, v);
-                }
-                let _ = std::env::set_current_dir(&self.cwd);
-            }
-            let err = crate::builtins::exec::execvp(&args_bytes[0], &args_bytes);
+            // Avoid mutating the process environment after fork: another thread
+            // may hold Rust's environment lock when the child is created.
+            let env = self.vars.env_for_command_os(&assign_bytes);
+            let _ = std::env::set_current_dir(&self.cwd);
+            let err = crate::builtins::exec::execve_with_env(&args_bytes[0], &args_bytes, &env);
             self.restore_redirections(saved);
             return self.handle_exec_error(&err, &args[0]);
         }
@@ -1735,6 +1775,22 @@ mod tests {
     }
 
     #[test]
+    fn dot_navigation_is_lexically_resolved() {
+        assert!(is_dot_navigation(Path::new(".././..")));
+        assert!(!is_dot_navigation(Path::new("../child")));
+        assert!(!is_dot_navigation(Path::new("/../")));
+
+        assert_eq!(
+            apply_dot_navigation(Path::new("/tmp/a"), Path::new(".././..")),
+            Path::new("/")
+        );
+        assert_eq!(
+            apply_dot_navigation(Path::new("/"), Path::new("../..")),
+            Path::new("/")
+        );
+    }
+
+    #[test]
     fn run_true_false() {
         let mut shell = Shell::new();
         assert_eq!(shell.run_script("true"), 0);
@@ -1836,6 +1892,24 @@ mod tests {
         // Simple pipeline test using external commands
         let status = shell.run_script("echo hello | cat");
         assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn run_pipeline_external_preserves_shell_environment() {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let output_path = output.path().to_string_lossy();
+        let mut shell = Shell::builder().env_clear().build();
+        shell.set_var("EPSH_PIPELINE_ENV", "works").unwrap();
+        shell.vars_mut().export("EPSH_PIPELINE_ENV");
+
+        let status = shell.run_script(&format!(
+            "/usr/bin/env | /usr/bin/grep EPSH_PIPELINE_ENV > {output_path}"
+        ));
+        assert_eq!(status, 0);
+        assert_eq!(
+            std::fs::read_to_string(output.path()).unwrap(),
+            "EPSH_PIPELINE_ENV=works\n"
+        );
     }
 
     #[test]

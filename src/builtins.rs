@@ -6,6 +6,7 @@ use crate::shell_bytes::ShellBytes;
 use crate::sys;
 use crate::test_cmd::test_eval;
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 fn kill_with_rustix(pid: i32, signum: i32) -> Result<(), rustix::io::Errno> {
     if signum == 0 {
@@ -194,11 +195,12 @@ impl Shell {
             }
         };
 
-        let target = self.resolve_path_bytes(&ShellBytes::from_str_lossless(&dir));
-        match target.canonicalize() {
+        let path = PathBuf::from(ShellBytes::from_str_lossless(&dir).to_os_string());
+        match self.resolve_cd_path(&path) {
             Ok(canonical) => {
                 if canonical.is_dir() {
                     self.cwd = canonical;
+                    self.cwd_is_canonical = true;
                     let _ = self
                         .vars
                         .set_bytes("PWD", ShellBytes::from_os_str(self.cwd.as_os_str()));
@@ -573,16 +575,9 @@ impl Shell {
 
         // exec with command — replace process
         let args_bytes: Vec<ShellBytes> = args.iter().cloned().map(Into::into).collect();
-        unsafe {
-            for (k, _) in std::env::vars_os() {
-                std::env::remove_var(k);
-            }
-            for (k, v) in self.vars.env_for_command_os(&[]) {
-                std::env::set_var(k, v);
-            }
-            let _ = std::env::set_current_dir(&self.cwd);
-        }
-        let err = exec::execvp(&args_bytes[0], &args_bytes);
+        let env = self.vars.env_for_command_os(&[]);
+        let _ = std::env::set_current_dir(&self.cwd);
+        let err = exec::execve_with_env(&args_bytes[0], &args_bytes, &env);
         self.err_msg(&format!("exec: {}: {err}", args[0]));
         Ok(ExitStatus::NOT_EXECUTABLE)
     }
@@ -1201,33 +1196,91 @@ fn unescape_echo(s: &str) -> String {
 
 /// exec family helpers
 pub(crate) mod exec {
-    use std::ffi::CString;
+    use std::ffi::{CString, OsString};
+    use std::os::unix::ffi::OsStrExt;
 
     use crate::shell_bytes::ShellBytes;
 
-    pub fn execvp(cmd: &ShellBytes, args: &[ShellBytes]) -> std::io::Error {
-        let Ok(c_cmd) = cmd.to_cstring() else {
-            return std::io::Error::from(rustix::io::Errno::NOENT);
+    fn execve_path(
+        path: &[u8],
+        c_args: &[*const std::os::raw::c_char],
+        c_env: &[*const std::os::raw::c_char],
+    ) -> std::io::Error {
+        let Ok(c_path) = CString::new(path) else {
+            return std::io::Error::from(rustix::io::Errno::INVAL);
         };
-        let c_args: Vec<CString> = match args
-            .iter()
-            .map(ShellBytes::to_cstring)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(v) => v,
-            Err(_) => return std::io::Error::from(rustix::io::Errno::INVAL),
+        // SAFETY: all pointers refer to live, null-terminated buffers for the
+        // duration of the call. execve only returns on error.
+        unsafe {
+            crate::sys::execve(c_path.as_ptr(), c_args.as_ptr(), c_env.as_ptr());
+        }
+        std::io::Error::last_os_error()
+    }
+
+    pub fn execve_with_env(
+        cmd: &ShellBytes,
+        args: &[ShellBytes],
+        env: &[(OsString, OsString)],
+    ) -> std::io::Error {
+        let Ok(c_args): Result<Vec<_>, _> = args.iter().map(ShellBytes::to_cstring).collect()
+        else {
+            return std::io::Error::from(rustix::io::Errno::INVAL);
         };
         let c_argv: Vec<*const std::os::raw::c_char> = c_args
             .iter()
-            .map(|a| a.as_ptr())
+            .map(|arg| arg.as_ptr())
             .chain(std::iter::once(std::ptr::null()))
             .collect();
 
-        // SAFETY: c_cmd and c_argv are valid null-terminated CStrings; c_argv is null-terminated.
-        // execvp only returns on error. The CString/Vec locals are kept alive for the call.
-        unsafe {
-            crate::sys::execvp(c_cmd.as_ptr(), c_argv.as_ptr());
+        let c_env: Vec<CString> = match env
+            .iter()
+            .map(|(name, value)| {
+                let mut bytes = name.as_bytes().to_vec();
+                bytes.push(b'=');
+                bytes.extend_from_slice(value.as_bytes());
+                CString::new(bytes)
+            })
+            .collect()
+        {
+            Ok(env) => env,
+            Err(_) => return std::io::Error::from(rustix::io::Errno::INVAL),
+        };
+        let c_envp: Vec<*const std::os::raw::c_char> = c_env
+            .iter()
+            .map(|entry| entry.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        if cmd.as_bytes().contains(&b'/') {
+            return execve_path(cmd.as_bytes(), &c_argv, &c_envp);
         }
-        std::io::Error::last_os_error()
+
+        let path = env
+            .iter()
+            .find(|(name, _)| name.as_bytes() == b"PATH")
+            .map(|(_, value)| value.as_bytes())
+            .unwrap_or(b"/usr/local/bin:/usr/bin:/bin");
+        let mut permission_error = None;
+        let mut last_error = None;
+        for directory in path.split(|&byte| byte == b':') {
+            let mut candidate = Vec::with_capacity(directory.len() + 1 + cmd.len());
+            if directory.is_empty() {
+                candidate.push(b'.');
+            } else {
+                candidate.extend_from_slice(directory);
+            }
+            candidate.push(b'/');
+            candidate.extend_from_slice(cmd.as_bytes());
+            let error = execve_path(&candidate, &c_argv, &c_envp);
+            match error.raw_os_error() {
+                Some(code) if code == libc::ENOENT || code == libc::ENOTDIR => {}
+                Some(code) if code == libc::EACCES => permission_error = Some(error),
+                _ => last_error = Some(error),
+            }
+        }
+
+        permission_error
+            .or(last_error)
+            .unwrap_or_else(|| std::io::Error::from(rustix::io::Errno::NOENT))
     }
 }
