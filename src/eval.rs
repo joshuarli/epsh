@@ -18,6 +18,103 @@ fn is_dot_navigation(path: &Path) -> bool {
     has_component
 }
 
+/// True if `path` is a regular file with any execute bit set.
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// The interpreter path from a script's `#!` line, or None if the first line
+/// is not a shebang (or the file cannot be read). Mirrors bash's `getinterp`.
+fn read_shebang_interpreter(path: &Path) -> Option<String> {
+    let mut buf = [0u8; 128];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = file.read(&mut buf).ok()?;
+    if n < 2 || buf[0] != b'#' || buf[1] != b'!' {
+        return None;
+    }
+    let mut i = 2;
+    while i < n && buf[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    while i < n && !buf[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if start >= i {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[start..i]).into_owned())
+}
+
+/// The platform's strerror text for an errno, e.g. "Not a directory".
+fn os_error_string(code: i32) -> String {
+    unsafe {
+        let msg = libc::strerror(code);
+        if msg.is_null() {
+            return format!("os error {code}");
+        }
+        std::ffi::CStr::from_ptr(msg).to_string_lossy().into_owned()
+    }
+}
+
+/// The file exec would attempt for `cmd_name`: slash paths resolve against
+/// `cwd`; slashless names search `path_env` like `execve_with_env`. Returns
+/// None for a slashless name found in no PATH directory.
+fn resolve_exec_path(cmd_name: &str, cwd: &Path, path_env: &str) -> Option<PathBuf> {
+    let name_path = PathBuf::from(cmd_name);
+    if cmd_name.contains('/') {
+        return Some(if name_path.is_absolute() {
+            name_path
+        } else {
+            cwd.join(name_path)
+        });
+    }
+    for directory in path_env.split(':') {
+        let dir = if directory.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(directory)
+        };
+        let full = if dir.is_absolute() {
+            dir.join(cmd_name)
+        } else {
+            cwd.join(dir).join(cmd_name)
+        };
+        if full.is_file() {
+            return Some(full);
+        }
+    }
+    None
+}
+
+/// bash-style `cmd: interp: bad interpreter: <errno>` message when `cmd`
+/// resolves to an executable script whose `#!` interpreter cannot run.
+/// Returns None when the error is unrelated to a shebang script.
+///
+/// `cwd` is the directory relative paths resolve against; `path_env` is the
+/// PATH used for slashless command lookup. Embedders with a custom
+/// [`Shell::set_external_handler`] handler can call this with the same cwd and
+/// PATH their spawn uses to match the default exec error reporting.
+pub fn bad_interpreter_message(cmd_name: &str, code: i32, cwd: &Path, path_env: &str) -> Option<String> {
+    // E2BIG/ENOMEM are resource errors, not interpreter problems.
+    if matches!(code, libc::E2BIG | libc::ENOMEM) {
+        return None;
+    }
+    let path = resolve_exec_path(cmd_name, cwd, path_env)?;
+    if !is_executable_file(&path) {
+        return None;
+    }
+    let interp = read_shebang_interpreter(&path)?;
+    Some(format!(
+        "{cmd_name}: {interp}: bad interpreter: {}",
+        os_error_string(code)
+    ))
+}
+
 fn apply_dot_navigation(cwd: &Path, path: &Path) -> PathBuf {
     let mut result = cwd.to_path_buf();
     for component in path.components() {
@@ -1248,6 +1345,18 @@ impl Shell {
         e: &std::io::Error,
         cmd_name: &str,
     ) -> crate::error::Result<ExitStatus> {
+        // An executable script whose interpreter is broken surfaces as a bare
+        // ENOTDIR/ENOENT/EACCES; report it bash-style instead of a raw errno.
+        if let Some(code) = e.raw_os_error() {
+            let path_env = self
+                .vars
+                .get("PATH")
+                .unwrap_or("/usr/local/bin:/usr/bin:/bin");
+            if let Some(msg) = bad_interpreter_message(cmd_name, code, &self.cwd, path_env) {
+                self.err_msg(&msg);
+                return Ok(ExitStatus::NOT_EXECUTABLE);
+            }
+        }
         if e.kind() == std::io::ErrorKind::NotFound {
             self.err_msg(&format!("{cmd_name}: not found"));
             Ok(ExitStatus::NOT_FOUND)

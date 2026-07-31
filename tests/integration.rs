@@ -1530,6 +1530,78 @@ mod noexec {
     }
 }
 
+mod bad_interpreter {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// A script whose `#!` interpreter cannot run reports the interpreter
+    /// bash-style instead of a bare errno.
+    #[test]
+    fn broken_interpreter_reports_interpreter_path() {
+        let dir = tempdir().unwrap();
+        // Interpreter path contains a regular file as a directory component.
+        let file = dir.path().join("notdir");
+        fs::write(&file, "x").unwrap();
+        let script = dir.path().join("script");
+        let interp = file.join("interp");
+        fs::write(&script, format!("#!{}\n", interp.display())).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let (_, stderr, code) = run_in(dir.path(), "./script");
+        assert_eq!(code, 126, "stderr: {stderr}");
+        let prefix = format!("./script: {}: bad interpreter: ", interp.display());
+        assert!(
+            stderr.starts_with(&prefix),
+            "expected bad-interpreter message, got: {stderr:?}"
+        );
+        assert!(stderr.ends_with('\n'), "stderr: {stderr:?}");
+    }
+
+    #[test]
+    fn missing_interpreter_reports_interpreter_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("script");
+        let interp = dir.path().join("missing");
+        fs::write(&script, format!("#!{}\n", interp.display())).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let (_, stderr, code) = run_in(dir.path(), "./script");
+        assert_eq!(code, 126, "stderr: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "./script: {}: bad interpreter: No such file or directory\n",
+                interp.display()
+            )
+        );
+    }
+
+    #[test]
+    fn nonexistent_command_still_reports_not_found() {
+        let dir = tempdir().unwrap();
+        let (_, stderr, code) = run_in(dir.path(), "./nope");
+        assert_eq!(code, 127, "stderr: {stderr}");
+        assert_eq!(stderr, "./nope: not found\n");
+    }
+
+    #[test]
+    fn non_executable_script_still_reports_permission_denied() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("script");
+        fs::write(&script, format!("#!{}\n", dir.path().join("missing").display())).unwrap();
+        let (_, stderr, code) = run_in(dir.path(), "./script");
+        assert_eq!(code, 126, "stderr: {stderr}");
+        assert_eq!(stderr, "./script: permission denied\n");
+    }
+}
+
 mod raw_bytes {
     use super::*;
     use epsh::encoding;
