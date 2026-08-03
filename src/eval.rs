@@ -170,9 +170,11 @@ use crate::var::Variables;
 
 /// Callback for external command execution.
 ///
-/// Receives expanded argv (`argv[0]` is the command name) and prefix assignment
-/// pairs. Redirections are already applied to file descriptors before the
-/// handler is called. Return the exit status of the command.
+/// Receives expanded argv (`argv[0]` is the command name) and the environment
+/// the command should run with: exported shell variables plus any prefix
+/// assignment pairs (which override exported values). Redirections are already
+/// applied to file descriptors before the handler is called. Return the exit
+/// status of the command.
 pub type ExternalHandler = Box<
     dyn FnMut(&[ShellBytes], &[(String, ShellBytes)]) -> crate::error::Result<ExitStatus> + Send,
 >;
@@ -1268,8 +1270,13 @@ impl Shell {
                 self.ev_exit = false; // function body may have multiple commands
                 self.eval_function(&func_body, &expanded_args, assigns, &[], span)
             } else if self.external_handler.is_some() {
-                // Build prefix assignment pairs for the external handler
-                let mut env_pairs = Vec::new();
+                // Build the child environment for the external handler:
+                // exported variables first, then prefix assignments which
+                // override them. The handler replaces epsh's exec path, so it
+                // needs the same exported environment eval_external would
+                // construct (minus the inherited non-shell-name entries, which
+                // embedders inherit from the parent process).
+                let mut env_pairs = self.vars.exported_env_bytes();
                 for assign in assigns {
                     let value = self.expand_string(&assign.value)?;
                     env_pairs.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));

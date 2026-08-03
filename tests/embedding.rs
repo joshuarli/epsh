@@ -438,6 +438,21 @@ mod external_handler {
     }
 
     #[test]
+    fn handler_receives_exported_env() {
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, ShellBytes)>>::new()));
+        let env_ref = captured_env.clone();
+        let handler: ExternalHandler = Box::new(move |_args, env| {
+            env_ref.lock().unwrap().push(env.to_vec());
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        shell.run_program(&parse("X=set_val; export X; mycmd"));
+        let calls = captured_env.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains(&("X".into(), ShellBytes::from("set_val"))));
+    }
+
+    #[test]
     fn handler_not_called_for_builtins() {
         let call_count = Arc::new(Mutex::new(0));
         let count_ref = call_count.clone();
