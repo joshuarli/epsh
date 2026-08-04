@@ -152,6 +152,44 @@ mod builtins {
     }
 
     #[test]
+    fn set_var_sets_and_exports_env() {
+        assert_output("set FOO bar; echo $FOO", "bar\n");
+    }
+
+    #[test]
+    fn set_var_joins_multiple_words() {
+        assert_output("set GREETING hello world; echo $GREETING", "hello world\n");
+    }
+
+    #[test]
+    fn set_var_single_arg_sets_empty() {
+        assert_output("set EMPTY_ONLY; echo =$EMPTY_ONLY=", "==\n");
+    }
+
+    #[test]
+    fn set_var_exports_to_children() {
+        let (stdout, _, code) = run("set VISIBLE yes; /bin/sh -c 'echo $VISIBLE'");
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "yes\n");
+    }
+
+    #[test]
+    fn set_var_and_positional_stay_distinct() {
+        // bare-name form sets an env var; -- keeps positional assignment
+        assert_output(
+            "set NAME value; echo $NAME; set -- x y; echo $1 $2",
+            "value\nx y\n",
+        );
+    }
+
+    #[test]
+    fn set_no_args_lists_exported_env() {
+        let (stdout, _, code) = run("set FOO bar; set");
+        assert_eq!(code, 0);
+        assert!(stdout.contains("FOO=bar"), "stdout: {stdout}");
+    }
+
+    #[test]
     fn shift_positional() {
         assert_output("set -- a b c; shift; echo $1 $2", "b c\n");
     }
@@ -1595,7 +1633,11 @@ mod bad_interpreter {
     fn non_executable_script_still_reports_permission_denied() {
         let dir = tempdir().unwrap();
         let script = dir.path().join("script");
-        fs::write(&script, format!("#!{}\n", dir.path().join("missing").display())).unwrap();
+        fs::write(
+            &script,
+            format!("#!{}\n", dir.path().join("missing").display()),
+        )
+        .unwrap();
         let (_, stderr, code) = run_in(dir.path(), "./script");
         assert_eq!(code, 126, "stderr: {stderr}");
         assert_eq!(stderr, "./script: permission denied\n");

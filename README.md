@@ -106,9 +106,11 @@ editing, job control builtins). However, it provides the minimal primitives
 needed for an interactive shell to be built on top:
 
 - **`external_handler`**: Replace the default fork+exec with your own process
-  spawner. Your handler receives expanded argv and prefix assignment pairs with redirections
-  already applied to file descriptors. This lets you own the fork/exec/wait cycle for
-  terminal and job control.
+  spawner. Your handler receives expanded argv and the complete child environment
+  as raw byte pairs, with redirections already applied to file descriptors. The
+  environment includes inherited non-shell-name entries, exported variables, and
+  prefix assignments. This lets you own the fork/exec/wait cycle for terminal and
+  job control without inheriting the embedder's process environment accidentally.
 
 - **`interactive` mode**: When enabled, pipelines call `tcsetpgrp` to give the
   foreground process group the terminal, and `waitpid` uses `WUNTRACED` to

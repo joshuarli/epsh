@@ -35,7 +35,7 @@ fn int_cache(value: Option<&ShellBytes>) -> Option<i64> {
         .and_then(|s| s.parse::<i64>().ok())
 }
 
-fn is_shell_name_bytes(bytes: &[u8]) -> Option<String> {
+pub(crate) fn is_shell_name_bytes(bytes: &[u8]) -> Option<String> {
     let first = *bytes.first()?;
     if !(first == b'_' || first.is_ascii_alphabetic()) {
         return None;
@@ -354,6 +354,7 @@ impl Variables {
         assigns: &[(String, ShellBytes)],
     ) -> Vec<(OsString, OsString)> {
         let mut shadowed = FxHashSet::default();
+        let mut assigned = FxHashSet::default();
         for name in self.vars.iter().filter_map(|(k, v)| {
             if v.flags.has(VarFlags::EXPORT) && v.value.is_some() {
                 Some(k.as_bytes().to_vec())
@@ -364,6 +365,7 @@ impl Variables {
             shadowed.insert(name);
         }
         for (name, _) in assigns {
+            assigned.insert(name.as_bytes().to_vec());
             shadowed.insert(name.as_bytes().to_vec());
         }
 
@@ -374,7 +376,9 @@ impl Variables {
             }
         }
         for (name, value) in self.exported_env_bytes() {
-            env.push((OsString::from(name), value.to_os_string()));
+            if !assigned.contains(name.as_bytes()) {
+                env.push((OsString::from(name), value.to_os_string()));
+            }
         }
         for (name, value) in assigns {
             env.push((OsString::from(name), value.to_os_string()));
@@ -460,5 +464,36 @@ mod tests {
     fn ifs_default() {
         let vars = Variables::new();
         assert_eq!(vars.ifs(), " \t\n");
+    }
+
+    #[test]
+    fn env_for_command_os_is_exact_and_assignment_aware() {
+        let mut vars = Variables::new_clean();
+        vars.inherited_env = vec![(ShellBytes::from("1INHERITED"), ShellBytes::from("ambient"))];
+        vars.set("KEEP", "stored").unwrap();
+        vars.export("KEEP");
+        vars.set("REMOVE", "gone").unwrap();
+        vars.export("REMOVE");
+        vars.unset("REMOVE").unwrap();
+
+        let env = vars.env_for_command_os(&[("KEEP".into(), ShellBytes::from("prefix"))]);
+        let mut entries: Vec<(String, String)> = env
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        entries.sort();
+
+        assert_eq!(
+            entries,
+            vec![
+                ("1INHERITED".into(), "ambient".into()),
+                ("KEEP".into(), "prefix".into()),
+            ]
+        );
     }
 }

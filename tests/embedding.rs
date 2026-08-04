@@ -423,7 +423,7 @@ mod external_handler {
 
     #[test]
     fn handler_receives_env_pairs() {
-        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, ShellBytes)>>::new()));
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(ShellBytes, ShellBytes)>>::new()));
         let env_ref = captured_env.clone();
         let handler: ExternalHandler = Box::new(move |_args, env| {
             env_ref.lock().unwrap().push(env.to_vec());
@@ -433,13 +433,13 @@ mod external_handler {
         shell.run_program(&parse("FOO=bar BAZ=qux mycmd"));
         let calls = captured_env.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].contains(&("FOO".into(), ShellBytes::from("bar"))));
-        assert!(calls[0].contains(&("BAZ".into(), ShellBytes::from("qux"))));
+        assert!(calls[0].contains(&(ShellBytes::from("FOO"), ShellBytes::from("bar"))));
+        assert!(calls[0].contains(&(ShellBytes::from("BAZ"), ShellBytes::from("qux"))));
     }
 
     #[test]
     fn handler_receives_exported_env() {
-        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(String, ShellBytes)>>::new()));
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(ShellBytes, ShellBytes)>>::new()));
         let env_ref = captured_env.clone();
         let handler: ExternalHandler = Box::new(move |_args, env| {
             env_ref.lock().unwrap().push(env.to_vec());
@@ -449,7 +449,36 @@ mod external_handler {
         shell.run_program(&parse("X=set_val; export X; mycmd"));
         let calls = captured_env.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].contains(&("X".into(), ShellBytes::from("set_val"))));
+        assert!(calls[0].contains(&(ShellBytes::from("X"), ShellBytes::from("set_val"))));
+    }
+
+    #[test]
+    fn handler_receives_complete_store_environment_without_unset_values() {
+        let captured_env = Arc::new(Mutex::new(Vec::<Vec<(ShellBytes, ShellBytes)>>::new()));
+        let env_ref = captured_env.clone();
+        let handler: ExternalHandler = Box::new(move |_args, env| {
+            env_ref.lock().unwrap().push(env.to_vec());
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder()
+            .env_clear()
+            .external_handler(handler)
+            .build();
+        shell.run_program(&parse(
+            "export KEEP=stored REMOVE=gone; unset REMOVE; PREFIX=prefix mycmd",
+        ));
+
+        let calls = captured_env.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let mut entries = calls[0].clone();
+        entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        assert_eq!(
+            entries,
+            vec![
+                (ShellBytes::from("KEEP"), ShellBytes::from("stored")),
+                (ShellBytes::from("PREFIX"), ShellBytes::from("prefix")),
+            ]
+        );
     }
 
     #[test]

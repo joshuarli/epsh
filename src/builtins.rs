@@ -289,6 +289,10 @@ impl Shell {
 
     fn builtin_set(&mut self, args: &[String]) -> ExitStatus {
         if args.len() <= 1 {
+            // `set` with no arguments lists exported environment variables.
+            for (k, v) in self.vars.exported_env() {
+                self.write_out(&format!("{k}={v}\n"));
+            }
             return ExitStatus::SUCCESS;
         }
 
@@ -336,6 +340,19 @@ impl Shell {
                     }
                 }
                 i += 1;
+            } else if crate::var::is_shell_name_bytes(arg.as_bytes()).is_some() {
+                // `set NAME [value...]` sets and exports an environment
+                // variable (the ish interactive contract). Remaining words are
+                // joined with spaces into the value; `set NAME` sets an empty
+                // value. Explicit positional assignment stays behind `--`.
+                let name = arg.clone();
+                let value = args[i + 1..].join(" ");
+                if let Err(e) = self.vars.set(&name, &value) {
+                    self.err_msg(&format!("set: {e}"));
+                    return ExitStatus::FAILURE;
+                }
+                self.vars.export(&name);
+                return ExitStatus::SUCCESS;
             } else {
                 // Positional parameters
                 self.vars.positional = args[i..].iter().cloned().map(Into::into).collect();

@@ -99,7 +99,12 @@ fn resolve_exec_path(cmd_name: &str, cwd: &Path, path_env: &str) -> Option<PathB
 /// PATH used for slashless command lookup. Embedders with a custom
 /// [`Shell::set_external_handler`] handler can call this with the same cwd and
 /// PATH their spawn uses to match the default exec error reporting.
-pub fn bad_interpreter_message(cmd_name: &str, code: i32, cwd: &Path, path_env: &str) -> Option<String> {
+pub fn bad_interpreter_message(
+    cmd_name: &str,
+    code: i32,
+    cwd: &Path,
+    path_env: &str,
+) -> Option<String> {
     // E2BIG/ENOMEM are resource errors, not interpreter problems.
     if matches!(code, libc::E2BIG | libc::ENOMEM) {
         return None;
@@ -170,13 +175,17 @@ use crate::var::Variables;
 
 /// Callback for external command execution.
 ///
-/// Receives expanded argv (`argv[0]` is the command name) and the environment
-/// the command should run with: exported shell variables plus any prefix
-/// assignment pairs (which override exported values). Redirections are already
-/// applied to file descriptors before the handler is called. Return the exit
-/// status of the command.
+/// Receives expanded argv (`argv[0]` is the command name) and the complete
+/// environment the command should run with, as raw bytes: inherited
+/// non-shell-name entries, exported shell variables, and any prefix assignment
+/// pairs (which override exported values). This is exactly the environment
+/// `eval_external` would construct (`env_for_command_os`), so a handler can
+/// replace epsh's exec path without inheriting the embedder's process
+/// environment. Redirections are already applied to file descriptors before
+/// the handler is called. Return the exit status of the command.
 pub type ExternalHandler = Box<
-    dyn FnMut(&[ShellBytes], &[(String, ShellBytes)]) -> crate::error::Result<ExitStatus> + Send,
+    dyn FnMut(&[ShellBytes], &[(ShellBytes, ShellBytes)]) -> crate::error::Result<ExitStatus>
+        + Send,
 >;
 
 /// A POSIX shell interpreter instance.
@@ -723,7 +732,9 @@ impl Shell {
     /// that are not builtins or functions. Redirections are already applied to
     /// fds before the handler runs. The handler receives:
     /// - `argv`: expanded arguments (`argv[0]` is the command name)
-    /// - `prefix_assignments`: variable assignments (`FOO=bar cmd` → `[("FOO", "bar")]`)
+    /// - `env`: the complete child environment as raw byte pairs, including
+    ///   inherited non-shell-name entries, exported variables, and prefix
+    ///   assignments
     pub fn set_external_handler(&mut self, handler: ExternalHandler) {
         self.external_handler = Some(handler);
     }
@@ -1270,17 +1281,28 @@ impl Shell {
                 self.ev_exit = false; // function body may have multiple commands
                 self.eval_function(&func_body, &expanded_args, assigns, &[], span)
             } else if self.external_handler.is_some() {
-                // Build the child environment for the external handler:
-                // exported variables first, then prefix assignments which
-                // override them. The handler replaces epsh's exec path, so it
-                // needs the same exported environment eval_external would
-                // construct (minus the inherited non-shell-name entries, which
-                // embedders inherit from the parent process).
-                let mut env_pairs = self.vars.exported_env_bytes();
+                // Build the complete child environment for the external
+                // handler: inherited non-shell-name entries, exported shell
+                // variables, and prefix assignments (which override exported
+                // values). This mirrors what eval_external would hand to exec,
+                // so the handler's child inherits nothing from the embedder's
+                // process environment beyond the store.
+                let mut assign_bytes: Vec<(String, ShellBytes)> = Vec::with_capacity(assigns.len());
                 for assign in assigns {
                     let value = self.expand_string(&assign.value)?;
-                    env_pairs.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
+                    assign_bytes.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
                 }
+                let env_pairs: Vec<(ShellBytes, ShellBytes)> = self
+                    .vars
+                    .env_for_command_os(&assign_bytes)
+                    .into_iter()
+                    .map(|(name, value)| {
+                        (
+                            ShellBytes::from_os_string(name),
+                            ShellBytes::from_os_string(value),
+                        )
+                    })
+                    .collect();
                 let args_bytes: Vec<ShellBytes> =
                     expanded_args.iter().cloned().map(Into::into).collect();
                 let handler = self.external_handler.as_mut().unwrap();
