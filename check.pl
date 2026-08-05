@@ -251,6 +251,7 @@ $nifailed = 0;
 $nxfailed = 0;
 $npassed = 0;
 $nxpassed = 0;
+$progress_started = 0;
 
 %known_tests = ();
 
@@ -385,6 +386,7 @@ if (-d $test_set) {
 $tot_failed = $nfailed + $nifailed + $nxfailed;
 $tot_passed = $npassed + $nxpassed;
 if ($tot_failed || $tot_passed) {
+    print "\n" if $progress_started;
     print "Total failed: $tot_failed";
     print " ($nifailed ignored)" if $nifailed;
     print " ($nxfailed unexpected)" if $nxfailed;
@@ -712,24 +714,25 @@ run_test
     if ($failed) {
 	if (!$test{'expected-fail'}) {
 	    if ($test{'need-pass'}) {
-		print "FAIL $name\n";
+		print "\nFAIL $name\n";
 		$nxfailed++;
 	    } else {
-		print "FAIL $name (ignored)\n";
+		print "\nFAIL $name (ignored)\n";
 		$nifailed++;
 	    }
 	} else {
-	    print "fail $name (as expected)\n";
+	    print "\nfail $name (as expected)\n";
 	    $nfailed++;
 	}
 	$why = "\tDescription"
 		. &wrap_lines($test{'description'}, " (missing)\n")
 		. $why;
     } elsif ($test{'expected-fail'}) {
-	print "PASS $name (unexpectedly)\n";
+	print "\nPASS $name (unexpectedly)\n";
 	$nxpassed++;
     } else {
-	print "pass $name\n";
+	print ".";
+	$progress_started = 1;
 	$npassed++;
     }
     print $why if $verbose;

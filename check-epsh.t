@@ -2244,7 +2244,7 @@ expected-stdout:
 
 name: xxx-prefix-strip-2
 stdin:
-	set a c
+	set -- a c
 	x='a cdef'
 	echo ${x#$*}
 expected-stdout:
