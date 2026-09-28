@@ -586,6 +586,123 @@ mod redirection_failures {
     }
 }
 
+mod redirect_open_handler {
+    use super::*;
+    use epsh::eval::{RedirectOpenHandler, RedirectOpenMode};
+    use std::os::fd::{AsFd, OwnedFd};
+
+    fn descriptor_is_open(fd: i32) -> bool {
+        // SAFETY: the descriptor is only borrowed for a flags query.
+        rustix::io::fcntl_getfd(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }).is_ok()
+    }
+
+    type Requests = Arc<Mutex<Vec<(PathBuf, RedirectOpenMode, i32)>>>;
+
+    fn recording_provider(
+        requests: Requests,
+        opened: PathBuf,
+        fail_name: Option<&'static str>,
+    ) -> RedirectOpenHandler {
+        Box::new(move |request| {
+            requests
+                .lock()
+                .unwrap()
+                .push((request.path.to_path_buf(), request.mode, request.fd));
+            if fail_name.is_some_and(|name| request.path.ends_with(name)) {
+                return Some(Err(std::io::Error::other("provider refused")));
+            }
+            if request.path.ends_with("default") {
+                return None;
+            }
+            let file = fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&opened)
+                .map(OwnedFd::from);
+            Some(file)
+        })
+    }
+
+    #[test]
+    fn provider_owns_writable_opens_in_order() {
+        let dir = tempdir().unwrap();
+        let opened = dir.path().join("provided");
+        let requests = Requests::default();
+        let mut shell = Shell::builder()
+            .cwd(dir.path().to_path_buf())
+            .stdout_sink(Arc::new(Mutex::new(Vec::<u8>::new())))
+            .redirect_open_handler(recording_provider(requests.clone(), opened.clone(), None))
+            .build();
+        let status = shell.run_program(&parse(
+            "printf one 57>a 58>>b 59<>c; printf two 57>|d; printf three 57>default",
+        ));
+        assert_eq!(status.code(), 0);
+        let requests = requests.lock().unwrap();
+        let expect = |name: &str, mode, fd| (dir.path().join(name), mode, fd);
+        assert_eq!(
+            *requests,
+            vec![
+                expect("a", RedirectOpenMode::Truncate, 57),
+                expect("b", RedirectOpenMode::Append, 58),
+                expect("c", RedirectOpenMode::ReadWrite, 59),
+                expect("d", RedirectOpenMode::Truncate, 57),
+                expect("default", RedirectOpenMode::Truncate, 57),
+            ]
+        );
+        // The provider's descriptors were used instead of path opens.
+        for name in ["a", "b", "c", "d"] {
+            assert!(!dir.path().join(name).exists(), "{name} was opened by path");
+        }
+        assert!(opened.exists());
+        // Declining falls back to epsh's own open.
+        assert!(dir.path().join("default").exists());
+        for fd in [57, 58, 59] {
+            assert!(!descriptor_is_open(fd), "fd {fd} leaked after the command");
+        }
+    }
+
+    #[test]
+    fn provider_error_restores_earlier_redirections() {
+        let dir = tempdir().unwrap();
+        let opened = dir.path().join("provided");
+        let requests = Requests::default();
+        let stderr = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let marker = fs::File::open(dir.path()).unwrap();
+        let marker_stat = rustix::fs::fstat(marker.as_fd()).unwrap();
+        // SAFETY: fd 60 is reserved for this test and closed at its end.
+        assert_eq!(
+            unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&marker), 60) },
+            60
+        );
+        let mut shell = Shell::builder()
+            .cwd(dir.path().to_path_buf())
+            .stderr_sink(stderr.clone())
+            .redirect_open_handler(recording_provider(
+                requests.clone(),
+                opened,
+                Some("refused"),
+            ))
+            .build();
+        let status = shell.run_program(&parse("printf never 60>first 61>first2 62>refused"));
+        assert_ne!(status.code(), 0);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        let message = String::from_utf8(stderr.lock().unwrap().clone()).unwrap();
+        assert!(message.contains("refused: provider refused"), "{message}");
+        // fd 60 was open before and points at the same object again; fds 61
+        // and 62 were closed before and are closed again.
+        let restored =
+            rustix::fs::fstat(unsafe { std::os::fd::BorrowedFd::borrow_raw(60) }).unwrap();
+        assert_eq!(
+            (restored.st_dev, restored.st_ino),
+            (marker_stat.st_dev, marker_stat.st_ino)
+        );
+        assert!(!descriptor_is_open(61));
+        assert!(!descriptor_is_open(62));
+        // SAFETY: fd 60 was duplicated above and is not used elsewhere.
+        unsafe { rustix::io::close(60) };
+    }
+}
+
 mod variables {
     use super::*;
 

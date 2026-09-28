@@ -59,6 +59,15 @@ shell.set_external_handler(Box::new(|argv, prefix_assignments| {
     todo!("spawn the process your way")
 }));
 
+// Optional: own the open(2) of writable redirections (>, >|, >>, <>).
+// Return None to keep epsh's default open, or the descriptor you opened
+// with exactly the requested semantics (for example after preserving the
+// existing file). Earlier redirections are restored if one fails.
+shell.set_redirect_open_handler(Box::new(|request| {
+    let _ = (request.path, request.mode, request.fd);
+    None
+}));
+
 // Interactive shell primitives
 let mut ish = Shell::builder()
     .interactive(true)           // enables tcsetpgrp + WUNTRACED

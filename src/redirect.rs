@@ -3,7 +3,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use crate::ast::*;
 use crate::error::ShellError;
-use crate::eval::Shell;
+use crate::eval::{RedirectOpen, RedirectOpenMode, Shell};
 use crate::shell_bytes::ShellBytes;
 
 use crate::sys;
@@ -32,6 +32,33 @@ impl Shell {
                 Err(e)
             }
         }
+    }
+
+    /// Open a writable redirection target, letting an installed provider own
+    /// the open. The default open matches `File::create`, append, and `<>`.
+    fn open_writable_redirection(
+        &mut self,
+        path: &std::path::Path,
+        mode: RedirectOpenMode,
+        target_fd: RawFd,
+    ) -> std::io::Result<std::os::fd::OwnedFd> {
+        if let Some(handler) = self.redirect_open_handler.as_mut() {
+            let request = RedirectOpen {
+                path,
+                mode,
+                fd: target_fd,
+            };
+            if let Some(result) = handler(&request) {
+                return result;
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        match mode {
+            RedirectOpenMode::Truncate => options.write(true).create(true).truncate(true),
+            RedirectOpenMode::Append => options.append(true).create(true),
+            RedirectOpenMode::ReadWrite => options.read(true).write(true).create(true),
+        };
+        options.open(path).map(Into::into)
     }
 
     fn apply_redirections(
@@ -76,48 +103,25 @@ impl Shell {
                     // SAFETY: file fd is valid from File::open; target_fd is the redirect target.
                     sys::dup2(file.as_raw_fd(), target_fd);
                 }
-                RedirKind::Output(word) | RedirKind::Clobber(word) => {
+                RedirKind::Output(word)
+                | RedirKind::Clobber(word)
+                | RedirKind::Append(word)
+                | RedirKind::ReadWrite(word) => {
+                    let mode = match redir.kind {
+                        RedirKind::Append(_) => RedirectOpenMode::Append,
+                        RedirKind::ReadWrite(_) => RedirectOpenMode::ReadWrite,
+                        _ => RedirectOpenMode::Truncate,
+                    };
                     let filename = self.expand_string(word)?;
                     let filepath =
                         self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
-                    let file = std::fs::File::create(&filepath).map_err(|e| {
-                        self.err_msg(&format!("{filename}: {e}"));
-                        ShellError::Io(e)
-                    })?;
-                    // SAFETY: file fd is valid from File::create; target_fd is the redirect target.
-                    sys::dup2(file.as_raw_fd(), target_fd);
-                }
-                RedirKind::Append(word) => {
-                    let filename = self.expand_string(word)?;
-                    let filepath =
-                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
-                    let file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .truncate(false)
-                        .append(true)
-                        .open(&filepath)
+                    let file = self
+                        .open_writable_redirection(&filepath, mode, target_fd)
                         .map_err(|e| {
                             self.err_msg(&format!("{filename}: {e}"));
                             ShellError::Io(e)
                         })?;
-                    // SAFETY: file fd is valid from OpenOptions::open; target_fd is the redirect target.
-                    sys::dup2(file.as_raw_fd(), target_fd);
-                }
-                RedirKind::ReadWrite(word) => {
-                    let filename = self.expand_string(word)?;
-                    let filepath =
-                        self.resolve_path_bytes(&ShellBytes::from_str_lossless(&filename));
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(&filepath)
-                        .map_err(|e| {
-                            self.err_msg(&format!("{filename}: {e}"));
-                            ShellError::Io(e)
-                        })?;
-                    // SAFETY: file fd is valid from OpenOptions::open; target_fd is the redirect target.
+                    // SAFETY: file is an open descriptor owned for this call; target_fd is the redirect target.
                     sys::dup2(file.as_raw_fd(), target_fd);
                 }
                 RedirKind::DupInput(word) | RedirKind::DupOutput(word) => {

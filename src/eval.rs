@@ -203,6 +203,38 @@ pub fn external_command_cwd() -> Option<PathBuf> {
     EXTERNAL_COMMAND_CWD.with(|cwd| cwd.borrow().clone())
 }
 
+/// How a writable redirection opens its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedirectOpenMode {
+    /// `>` and `>|`: write-only, create, truncate.
+    Truncate,
+    /// `>>`: write-only, create, append.
+    Append,
+    /// `<>`: read-write, create, no truncation.
+    ReadWrite,
+}
+
+/// A writable redirection about to be opened.
+#[derive(Debug)]
+pub struct RedirectOpen<'a> {
+    /// Target path, resolved against the shell's working directory.
+    pub path: &'a Path,
+    pub mode: RedirectOpenMode,
+    /// Descriptor number the opened file will be duplicated onto.
+    pub fd: RawFd,
+}
+
+/// Callback that owns the `open(2)` of writable redirections.
+///
+/// Return `None` to use epsh's default open, or the descriptor the provider
+/// opened itself. The provider must honor `mode` exactly (creation, truncation,
+/// append) because epsh only duplicates the returned descriptor onto
+/// [`RedirectOpen::fd`]. Errors are reported as `<path>: <error>` like default
+/// open failures. Input redirections, descriptor duplication, and heredocs do
+/// not call the provider.
+pub type RedirectOpenHandler =
+    Box<dyn FnMut(&RedirectOpen<'_>) -> Option<std::io::Result<std::os::fd::OwnedFd>> + Send>;
+
 /// A POSIX shell interpreter instance.
 ///
 /// Each `Shell` maintains its own variable scope, working directory, function
@@ -266,6 +298,8 @@ pub struct Shell {
     /// Optional callback that replaces eval_external for spawning processes.
     /// Lets embedders control process creation (job control, sandboxing, etc.).
     external_handler: Option<ExternalHandler>,
+    /// Optional provider that opens writable redirection targets.
+    pub(crate) redirect_open_handler: Option<RedirectOpenHandler>,
     /// PID of the last background command ($!).
     last_bg_pid: Option<u32>,
     /// Pending stdin fd for the next external command, set by setup_redirections
@@ -371,6 +405,7 @@ pub struct ShellBuilder {
     timeout: Option<std::time::Duration>,
     env_clear: bool,
     external_handler: Option<ExternalHandler>,
+    redirect_open_handler: Option<RedirectOpenHandler>,
 }
 
 impl Default for ShellBuilder {
@@ -396,6 +431,7 @@ impl ShellBuilder {
             timeout: None,
             env_clear: false,
             external_handler: None,
+            redirect_open_handler: None,
         }
     }
 
@@ -460,6 +496,11 @@ impl ShellBuilder {
         self.external_handler = Some(handler);
         self
     }
+    /// Set a provider that opens writable redirection targets.
+    pub fn redirect_open_handler(mut self, handler: RedirectOpenHandler) -> Self {
+        self.redirect_open_handler = Some(handler);
+        self
+    }
 
     pub fn build(self) -> Shell {
         let vars = if self.env_clear {
@@ -501,6 +542,7 @@ impl ShellBuilder {
             child_pids: Vec::new(),
             timeout: self.timeout.map(|d| std::time::Instant::now() + d),
             external_handler: self.external_handler,
+            redirect_open_handler: self.redirect_open_handler,
             last_bg_pid: None,
             pending_stdin: None,
         }
@@ -540,6 +582,7 @@ impl Shell {
             child_pids: Vec::new(),
             timeout: None,
             external_handler: None,
+            redirect_open_handler: None,
             last_bg_pid: None,
             pending_stdin: None,
         }
@@ -752,6 +795,12 @@ impl Shell {
     ///   assignments
     pub fn set_external_handler(&mut self, handler: ExternalHandler) {
         self.external_handler = Some(handler);
+    }
+
+    /// Install a provider that owns the open of writable redirections
+    /// (`>`, `>|`, `>>`, `<>`). See [`RedirectOpenHandler`].
+    pub fn set_redirect_open_handler(&mut self, handler: RedirectOpenHandler) {
+        self.redirect_open_handler = Some(handler);
     }
 
     pub(crate) fn has_external_handler(&self) -> bool {
