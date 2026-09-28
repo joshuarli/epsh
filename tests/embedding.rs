@@ -503,6 +503,43 @@ mod external_handler {
     }
 }
 
+mod redirection_failures {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    fn descriptor_is_open(fd: i32) -> bool {
+        // SAFETY: the descriptor is only borrowed for a flags query.
+        rustix::io::fcntl_getfd(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }).is_ok()
+    }
+
+    #[test]
+    fn failed_redirection_restores_earlier_descriptors() {
+        let dir = tempdir().unwrap();
+        let marker = fs::File::open(dir.path()).unwrap();
+        let marker_stat = rustix::fs::fstat(&marker).unwrap();
+        // SAFETY: fd 50 is reserved for this test and closed at its end.
+        assert_eq!(unsafe { libc::dup2(marker.as_raw_fd(), 50) }, 50);
+        let mut shell = Shell::builder()
+            .cwd(dir.path().to_path_buf())
+            .stderr_sink(Arc::new(Mutex::new(Vec::<u8>::new())))
+            .build();
+        let status = shell.run_program(&parse("printf never 50>first 51>second 52>missing/dir/x"));
+        assert_ne!(status.code(), 0);
+        // fd 50 points at the original object again; 51 and 52 were closed
+        // before and are closed again.
+        let restored =
+            rustix::fs::fstat(unsafe { std::os::fd::BorrowedFd::borrow_raw(50) }).unwrap();
+        assert_eq!(
+            (restored.st_dev, restored.st_ino),
+            (marker_stat.st_dev, marker_stat.st_ino)
+        );
+        assert!(!descriptor_is_open(51));
+        assert!(!descriptor_is_open(52));
+        // SAFETY: fd 50 was duplicated above and is not used elsewhere.
+        unsafe { rustix::io::close(50) };
+    }
+}
+
 mod variables {
     use super::*;
 

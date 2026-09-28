@@ -95,15 +95,6 @@ pub fn dup2(oldfd: RawFd, newfd: RawFd) -> i32 {
     }
 }
 
-/// Duplicate `fd` with the lowest available fd >= `min_fd`, CLOEXEC set.
-/// Returns the new fd, or -1 on error.
-pub fn fcntl_dupfd_cloexec(fd: RawFd, min_fd: RawFd) -> i32 {
-    match rustix::io::fcntl_dupfd_cloexec(unsafe { BorrowedFd::borrow_raw(fd) }, min_fd) {
-        Ok(owned) => owned.into_raw_fd(),
-        Err(_) => -1,
-    }
-}
-
 /// Wait for a child process. Mirrors libc `waitpid`: returns the pid (or -1 on
 /// error), and writes the raw status word into `status`. `options` is 0 or
 /// `WUNTRACED` (nonzero).

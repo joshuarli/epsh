@@ -12,16 +12,33 @@ use crate::sys;
 pub(crate) struct SavedFd {
     pub(crate) target_fd: RawFd,
     pub(crate) saved_copy: Option<RawFd>,
+    /// The target was not open before the redirection, so restoration closes it.
+    pub(crate) was_closed: bool,
 }
 
 impl Shell {
-    /// Apply redirections. Returns saved FD state for restoration.
+    /// Apply redirections left to right. Returns saved FD state for
+    /// restoration. When a later redirection fails, the descriptors changed by
+    /// earlier ones are restored before the error is returned.
     pub(crate) fn setup_redirections(
         &mut self,
         redirs: &[Redir],
     ) -> crate::error::Result<Vec<SavedFd>> {
         let mut saved = Vec::new();
+        match self.apply_redirections(redirs, &mut saved) {
+            Ok(()) => Ok(saved),
+            Err(e) => {
+                self.restore_redirections(saved);
+                Err(e)
+            }
+        }
+    }
 
+    fn apply_redirections(
+        &mut self,
+        redirs: &[Redir],
+        saved: &mut Vec<SavedFd>,
+    ) -> crate::error::Result<()> {
         for redir in redirs {
             let target_fd = redir.fd;
             let preserve_fd = !(target_fd == 0
@@ -32,14 +49,18 @@ impl Shell {
                 && (self.stdout_sink.is_some() || self.stderr_sink.is_some()));
 
             if preserve_fd {
-                let saved_copy = {
-                    let copy = sys::fcntl_dupfd_cloexec(target_fd, 10);
-                    if copy >= 0 { Some(copy) } else { None }
+                // SAFETY: target_fd is only borrowed for the duplicate; an
+                // unopened descriptor reports EBADF.
+                let target = unsafe { std::os::fd::BorrowedFd::borrow_raw(target_fd) };
+                let (saved_copy, was_closed) = match rustix::io::fcntl_dupfd_cloexec(target, 10) {
+                    Ok(copy) => (Some(std::os::fd::IntoRawFd::into_raw_fd(copy)), false),
+                    Err(e) => (None, e == rustix::io::Errno::BADF),
                 };
 
                 saved.push(SavedFd {
                     target_fd,
                     saved_copy,
+                    was_closed,
                 });
             }
 
@@ -162,7 +183,7 @@ impl Shell {
             }
         }
 
-        Ok(saved)
+        Ok(())
     }
 
     /// Restore file descriptors after redirections.
@@ -172,6 +193,16 @@ impl Shell {
                 // SAFETY: copy is a valid fd from fcntl_dupfd_cloexec; target_fd is the original fd being restored.
                 sys::dup2(copy, s.target_fd);
                 sys::close(copy);
+            } else if s.was_closed
+                // SAFETY: only queried; a redirection that failed before its
+                // dup2 left the descriptor closed, and closing it again would
+                // report EBADF.
+                && rustix::io::fcntl_getfd(unsafe {
+                    std::os::fd::BorrowedFd::borrow_raw(s.target_fd)
+                })
+                .is_ok()
+            {
+                sys::close(s.target_fd);
             }
         }
     }

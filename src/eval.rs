@@ -1274,42 +1274,49 @@ impl Shell {
         // Setup redirections before executing (applies to builtins, functions, externals)
         let saved_fds = self.setup_redirections(redirs)?;
 
-        let result =
-            if let Some(status) = self.try_builtin(cmd_name, &expanded_args, assigns, &[], span)? {
-                Ok(status)
-            } else if let Some(func_body) = self.functions.get(cmd_name).cloned() {
-                self.ev_exit = false; // function body may have multiple commands
-                self.eval_function(&func_body, &expanded_args, assigns, &[], span)
-            } else if self.external_handler.is_some() {
-                // Build the complete child environment for the external
-                // handler: inherited non-shell-name entries, exported shell
-                // variables, and prefix assignments (which override exported
-                // values). This mirrors what eval_external would hand to exec,
-                // so the handler's child inherits nothing from the embedder's
-                // process environment beyond the store.
-                let mut assign_bytes: Vec<(String, ShellBytes)> = Vec::with_capacity(assigns.len());
-                for assign in assigns {
-                    let value = self.expand_string(&assign.value)?;
-                    assign_bytes.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
+        // Every outcome, including builtin errors, falls through to the
+        // descriptor restoration below.
+        let result = match self.try_builtin(cmd_name, &expanded_args, assigns, &[], span) {
+            Ok(Some(status)) => Ok(status),
+            Err(e) => Err(e),
+            Ok(None) => {
+                if let Some(func_body) = self.functions.get(cmd_name).cloned() {
+                    self.ev_exit = false; // function body may have multiple commands
+                    self.eval_function(&func_body, &expanded_args, assigns, &[], span)
+                } else if self.external_handler.is_some() {
+                    // Build the complete child environment for the external
+                    // handler: inherited non-shell-name entries, exported shell
+                    // variables, and prefix assignments (which override exported
+                    // values). This mirrors what eval_external would hand to exec,
+                    // so the handler's child inherits nothing from the embedder's
+                    // process environment beyond the store.
+                    let mut assign_bytes: Vec<(String, ShellBytes)> =
+                        Vec::with_capacity(assigns.len());
+                    for assign in assigns {
+                        let value = self.expand_string(&assign.value)?;
+                        assign_bytes
+                            .push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
+                    }
+                    let env_pairs: Vec<(ShellBytes, ShellBytes)> = self
+                        .vars
+                        .env_for_command_os(&assign_bytes)
+                        .into_iter()
+                        .map(|(name, value)| {
+                            (
+                                ShellBytes::from_os_string(name),
+                                ShellBytes::from_os_string(value),
+                            )
+                        })
+                        .collect();
+                    let args_bytes: Vec<ShellBytes> =
+                        expanded_args.iter().cloned().map(Into::into).collect();
+                    let handler = self.external_handler.as_mut().unwrap();
+                    handler(&args_bytes, &env_pairs)
+                } else {
+                    self.eval_external(&expanded_args, assigns, &[], span)
                 }
-                let env_pairs: Vec<(ShellBytes, ShellBytes)> = self
-                    .vars
-                    .env_for_command_os(&assign_bytes)
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            ShellBytes::from_os_string(name),
-                            ShellBytes::from_os_string(value),
-                        )
-                    })
-                    .collect();
-                let args_bytes: Vec<ShellBytes> =
-                    expanded_args.iter().cloned().map(Into::into).collect();
-                let handler = self.external_handler.as_mut().unwrap();
-                handler(&args_bytes, &env_pairs)
-            } else {
-                self.eval_external(&expanded_args, assigns, &[], span)
-            };
+            }
+        };
 
         if is_exec {
             // exec redirections are permanent — close saved copies instead of restoring
