@@ -188,6 +188,21 @@ pub type ExternalHandler = Box<
         + Send,
 >;
 
+thread_local! {
+    static EXTERNAL_COMMAND_CWD: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Working directory of the command currently being passed to the external
+/// handler, or `None` outside a handler call.
+///
+/// `cd` changes only the shell's own working directory, not the process's, so
+/// a handler that spawns or resolves paths itself needs this to behave like
+/// `eval_external`, which runs children in the shell's directory.
+pub fn external_command_cwd() -> Option<PathBuf> {
+    EXTERNAL_COMMAND_CWD.with(|cwd| cwd.borrow().clone())
+}
+
 /// A POSIX shell interpreter instance.
 ///
 /// Each `Shell` maintains its own variable scope, working directory, function
@@ -1342,7 +1357,10 @@ impl Shell {
             .external_handler
             .as_mut()
             .expect("call_external_handler requires an installed handler");
-        handler(&args_bytes, &env_pairs)
+        let previous = EXTERNAL_COMMAND_CWD.with(|cwd| cwd.borrow_mut().replace(self.cwd.clone()));
+        let result = handler(&args_bytes, &env_pairs);
+        EXTERNAL_COMMAND_CWD.with(|cwd| *cwd.borrow_mut() = previous);
+        result
     }
 
     /// Evaluate a function call.

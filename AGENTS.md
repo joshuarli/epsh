@@ -54,7 +54,8 @@ let status = shell.run_program(&program);
 // Custom process spawner (for sandboxing, job control, SSH proxy)
 shell.set_external_handler(Box::new(|argv, prefix_assignments| {
     // argv[0] is the command name; prefix_assignments are variable assignments
-    // redirections already applied to file descriptors
+    // redirections already applied to file descriptors;
+    // epsh::eval::external_command_cwd() is the shell's working directory
     todo!("spawn the process your way")
 }));
 

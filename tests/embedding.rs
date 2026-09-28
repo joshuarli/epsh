@@ -512,6 +512,35 @@ mod external_handler {
     }
 
     #[test]
+    fn handler_sees_shell_working_directory() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_ref = seen.clone();
+        let handler: ExternalHandler = Box::new(move |_args, _env| {
+            seen_ref
+                .lock()
+                .unwrap()
+                .push(epsh::eval::external_command_cwd());
+            Ok(ExitStatus::SUCCESS)
+        });
+        let mut shell = Shell::builder()
+            .cwd(dir.path().to_path_buf())
+            .external_handler(handler)
+            .build();
+        shell.run_program(&parse("mycmd; cd sub && mycmd"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].as_deref(), Some(dir.path()));
+        assert_eq!(
+            seen[1].as_ref().map(|p| p.canonicalize().unwrap()),
+            Some(sub.canonicalize().unwrap())
+        );
+        assert_eq!(epsh::eval::external_command_cwd(), None);
+    }
+
+    #[test]
     fn handler_exit_status_propagates() {
         let handler: ExternalHandler = Box::new(|_args, _env| Ok(ExitStatus::from(42)));
         let mut shell = Shell::builder().external_handler(handler).build();

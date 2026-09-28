@@ -78,6 +78,7 @@ fn shell_public_methods() {
     shell.set_stdout_sink(Arc::new(Mutex::new(Vec::<u8>::new())));
     shell.set_stderr_sink(Arc::new(Mutex::new(Vec::<u8>::new())));
     shell.set_external_handler(Box::new(|_args, _env| Ok(error::ExitStatus::SUCCESS)));
+    let _cwd: Option<PathBuf> = eval::external_command_cwd();
 
     // ShellOpts fields
     shell.opts_mut().interactive = true;
