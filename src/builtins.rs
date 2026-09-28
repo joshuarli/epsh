@@ -661,9 +661,12 @@ impl Shell {
 
         let new_args: Vec<String> = args[i..].to_vec();
 
-        // `command` bypasses functions but NOT builtins
+        // `command` bypasses functions but NOT builtins. External commands use
+        // the embedder's handler when one is installed, like ordinary lookup.
         if let Some(status) = self.try_builtin(&new_args[0], &new_args, &[], &[], span)? {
             Ok(status)
+        } else if self.has_external_handler() {
+            self.call_external_handler(&new_args, &[])
         } else {
             self.eval_external(&new_args, &[], &[], span)
         }

@@ -739,6 +739,10 @@ impl Shell {
         self.external_handler = Some(handler);
     }
 
+    pub(crate) fn has_external_handler(&self) -> bool {
+        self.external_handler.is_some()
+    }
+
     /// Set the shell's working directory.
     pub fn set_cwd(&mut self, dir: PathBuf) {
         self.cwd = dir;
@@ -1284,34 +1288,7 @@ impl Shell {
                     self.ev_exit = false; // function body may have multiple commands
                     self.eval_function(&func_body, &expanded_args, assigns, &[], span)
                 } else if self.external_handler.is_some() {
-                    // Build the complete child environment for the external
-                    // handler: inherited non-shell-name entries, exported shell
-                    // variables, and prefix assignments (which override exported
-                    // values). This mirrors what eval_external would hand to exec,
-                    // so the handler's child inherits nothing from the embedder's
-                    // process environment beyond the store.
-                    let mut assign_bytes: Vec<(String, ShellBytes)> =
-                        Vec::with_capacity(assigns.len());
-                    for assign in assigns {
-                        let value = self.expand_string(&assign.value)?;
-                        assign_bytes
-                            .push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
-                    }
-                    let env_pairs: Vec<(ShellBytes, ShellBytes)> = self
-                        .vars
-                        .env_for_command_os(&assign_bytes)
-                        .into_iter()
-                        .map(|(name, value)| {
-                            (
-                                ShellBytes::from_os_string(name),
-                                ShellBytes::from_os_string(value),
-                            )
-                        })
-                        .collect();
-                    let args_bytes: Vec<ShellBytes> =
-                        expanded_args.iter().cloned().map(Into::into).collect();
-                    let handler = self.external_handler.as_mut().unwrap();
-                    handler(&args_bytes, &env_pairs)
+                    self.call_external_handler(&expanded_args, assigns)
                 } else {
                     self.eval_external(&expanded_args, assigns, &[], span)
                 }
@@ -1330,6 +1307,42 @@ impl Shell {
             self.restore_redirections(saved_fds);
         }
         result
+    }
+
+    /// Run an external command through the embedder's handler.
+    ///
+    /// Builds the complete child environment for the handler: inherited
+    /// non-shell-name entries, exported shell variables, and prefix
+    /// assignments (which override exported values). This mirrors what
+    /// eval_external would hand to exec, so the handler's child inherits
+    /// nothing from the embedder's process environment beyond the store.
+    pub(crate) fn call_external_handler(
+        &mut self,
+        args: &[String],
+        assigns: &[Assignment],
+    ) -> crate::error::Result<ExitStatus> {
+        let mut assign_bytes: Vec<(String, ShellBytes)> = Vec::with_capacity(assigns.len());
+        for assign in assigns {
+            let value = self.expand_string(&assign.value)?;
+            assign_bytes.push((assign.name.clone(), ShellBytes::from_str_lossless(&value)));
+        }
+        let env_pairs: Vec<(ShellBytes, ShellBytes)> = self
+            .vars
+            .env_for_command_os(&assign_bytes)
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    ShellBytes::from_os_string(name),
+                    ShellBytes::from_os_string(value),
+                )
+            })
+            .collect();
+        let args_bytes: Vec<ShellBytes> = args.iter().cloned().map(Into::into).collect();
+        let handler = self
+            .external_handler
+            .as_mut()
+            .expect("call_external_handler requires an installed handler");
+        handler(&args_bytes, &env_pairs)
     }
 
     /// Evaluate a function call.

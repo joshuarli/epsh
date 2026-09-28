@@ -495,6 +495,23 @@ mod external_handler {
     }
 
     #[test]
+    fn command_builtin_uses_handler() {
+        let captured_args = Arc::new(Mutex::new(Vec::<Vec<ShellBytes>>::new()));
+        let args_ref = captured_args.clone();
+        let handler: ExternalHandler = Box::new(move |args, _env| {
+            args_ref.lock().unwrap().push(args.to_vec());
+            Ok(ExitStatus::from(7))
+        });
+        let mut shell = Shell::builder().external_handler(handler).build();
+        let status = shell.run_program(&parse("command mycmd arg"));
+        assert_eq!(status.code(), 7);
+        assert_eq!(
+            *captured_args.lock().unwrap(),
+            vec![vec![ShellBytes::from("mycmd"), ShellBytes::from("arg")]]
+        );
+    }
+
+    #[test]
     fn handler_exit_status_propagates() {
         let handler: ExternalHandler = Box::new(|_args, _env| Ok(ExitStatus::from(42)));
         let mut shell = Shell::builder().external_handler(handler).build();
