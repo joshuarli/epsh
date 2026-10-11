@@ -21,9 +21,10 @@ release:
 	  -Z build-std-features= \
 	  --target $(TARGET)
 
-# Usage: make bump-version [V=x.y.z]
+# Usage: make publish [V=x.y.z]
 # Without V, increments the patch version.
-bump-version:
+.PHONY: publish
+publish:
 ifndef V
 	$(eval OLD := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml))
 	$(eval V := $(shell echo "$(OLD)" | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'))
@@ -33,3 +34,4 @@ endif
 	git add Cargo.toml Cargo.lock
 	git commit -m "bump version to $(V)"
 	git tag "release/$(V)"
+	cargo publish
